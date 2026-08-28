@@ -1,0 +1,35 @@
+# Bind address for the public gateway HTTP server.
+listen_address: ":8080"
+
+# Defaults apply unless a route provides an override.
+timeouts:
+  request: 15s
+  dial: 2s
+  tls_handshake: 3s
+  response_header: 5s
+  idle_connection: 90s
+
+rate_limit:
+  requests_per_second: 50
+  burst: 100
+
+backend_pools:
+  users:
+    strategy: round_robin # round_robin or least_connections
+    backends:
+      - url: http://users-1:8080
+      - url: http://users-2:8080
+  orders:
+    strategy: least_connections
+    backends:
+      - url: http://orders-1:8080
+
+routes:
+  - path_prefix: /api/users
+    backend_pool: users
+    # A route can override the global rate limit.
+    rate_limit:
+      requests_per_second: 20
+      burst: 40
+  - path_prefix: /api/orders
+    backend_pool: orders
