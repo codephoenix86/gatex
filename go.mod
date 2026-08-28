@@ -1,4 +1,4 @@
-module github.com/naresh-lohar/gatex
+module github.com/codephoenix86/gatex
 
 go 1.26.1
 
