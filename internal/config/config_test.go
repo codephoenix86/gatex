@@ -54,6 +54,24 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "must both be set",
 		},
+		{
+			name: "relative health check path",
+			mutate: func(cfg *Config) {
+				pool := cfg.BackendPools["users"]
+				pool.HealthCheck.Path = "healthz"
+				cfg.BackendPools["users"] = pool
+			},
+			wantErr: "health_check path",
+		},
+		{
+			name: "negative health check interval",
+			mutate: func(cfg *Config) {
+				pool := cfg.BackendPools["users"]
+				pool.HealthCheck.Interval = -1
+				cfg.BackendPools["users"] = pool
+			},
+			wantErr: "health_check interval cannot be negative",
+		},
 	}
 
 	for _, test := range tests {

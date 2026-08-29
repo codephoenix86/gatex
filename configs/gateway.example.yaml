@@ -16,6 +16,10 @@ rate_limit:
 backend_pools:
   users:
     strategy: round_robin # round_robin or least_connections
+    health_check:
+      path: /healthz
+      interval: 10s
+      timeout: 2s
     backends:
       - url: http://users-1:8080
       - url: http://users-2:8080

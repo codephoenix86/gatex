@@ -42,13 +42,22 @@ type RateLimit struct {
 
 // Pool groups interchangeable upstreams and selects a balancing strategy.
 type Pool struct {
-	Strategy string    `yaml:"strategy"`
-	Backends []Backend `yaml:"backends"`
+	Strategy    string      `yaml:"strategy"`
+	Backends    []Backend   `yaml:"backends"`
+	HealthCheck HealthCheck `yaml:"health_check"`
 }
 
 // Backend identifies an upstream base URL.
 type Backend struct {
 	URL string `yaml:"url"`
+}
+
+// HealthCheck configures how the gateway determines whether an upstream is
+// eligible to receive traffic. Zero values use the balancer's defaults.
+type HealthCheck struct {
+	Path     string        `yaml:"path"`
+	Interval time.Duration `yaml:"interval"`
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // Route maps a path prefix to one named backend pool.
@@ -103,6 +112,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("backend pool %q has invalid backend URL %q", name, backend.URL)
 			}
 		}
+		if err := validateHealthCheck(name, pool.HealthCheck); err != nil {
+			return err
+		}
 	}
 
 	if len(c.Routes) == 0 {
@@ -120,6 +132,19 @@ func (c Config) Validate() error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateHealthCheck(poolName string, check HealthCheck) error {
+	if check.Interval < 0 {
+		return fmt.Errorf("backend pool %q health_check interval cannot be negative", poolName)
+	}
+	if check.Timeout < 0 {
+		return fmt.Errorf("backend pool %q health_check timeout cannot be negative", poolName)
+	}
+	if check.Path != "" && !strings.HasPrefix(check.Path, "/") {
+		return fmt.Errorf("backend pool %q health_check path %q must start with /", poolName, check.Path)
 	}
 	return nil
 }
