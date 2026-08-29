@@ -2,7 +2,9 @@ package balancer
 
 import (
 	"errors"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -232,5 +234,71 @@ func TestBackendStateIsSafeUnderConcurrentAccess(t *testing.T) {
 
 	if got := backend.ActiveConnections(); got != 0 {
 		t.Errorf("ActiveConnections() = %d, want 0", got)
+	}
+}
+
+func TestPoolAcquireIsSafeUnderConcurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	for _, strategy := range []Strategy{RoundRobin, LeastConnections} {
+		t.Run(string(strategy), func(t *testing.T) {
+			t.Parallel()
+
+			pool, err := NewPoolWithStrategy([]string{
+				"http://backend-1.internal",
+				"http://backend-2.internal",
+				"http://backend-3.internal",
+			}, strategy)
+			if err != nil {
+				t.Fatalf("NewPoolWithStrategy() error = %v", err)
+			}
+			backends := pool.Backends()
+
+			const workers = 32
+			const iterations = 250
+			start := make(chan struct{})
+			var group sync.WaitGroup
+			var failedAcquisitions atomic.Int64
+			selectionCounts := make([]atomic.Int64, len(backends))
+
+			group.Add(workers)
+			for range workers {
+				go func() {
+					defer group.Done()
+					<-start
+					for range iterations {
+						backend, ok := pool.Acquire()
+						if !ok {
+							failedAcquisitions.Add(1)
+							continue
+						}
+						for index, candidate := range backends {
+							if backend == candidate {
+								selectionCounts[index].Add(1)
+								break
+							}
+						}
+						runtime.Gosched()
+						backend.Release()
+					}
+				}()
+			}
+			close(start)
+			group.Wait()
+
+			if got := failedAcquisitions.Load(); got != 0 {
+				t.Errorf("failed acquisitions = %d, want 0", got)
+			}
+			var selections int64
+			for index, backend := range backends {
+				selections += selectionCounts[index].Load()
+				if got := backend.ActiveConnections(); got != 0 {
+					t.Errorf("backend %d active connections = %d, want 0", index, got)
+				}
+			}
+			if want := int64(workers * iterations); selections != want {
+				t.Errorf("selections = %d, want %d", selections, want)
+			}
+		})
 	}
 }

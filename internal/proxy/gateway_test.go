@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,6 +298,80 @@ func TestGatewayStartsHealthChecks(t *testing.T) {
 	})
 	cancel()
 	gateway.WaitForHealthChecks()
+}
+
+func TestGatewayHandlesConcurrentRequestsWhileHealthChecksRun(t *testing.T) {
+	t.Parallel()
+
+	var proxiedRequests atomic.Int64
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/healthz" {
+			return upstreamResponse(request, http.StatusNoContent), nil
+		}
+		proxiedRequests.Add(1)
+		return upstreamResponse(request, http.StatusOK), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.LeastConnections,
+				Backends: []config.Backend{
+					{URL: "http://backend-1.internal"},
+					{URL: "http://backend-2.internal"},
+					{URL: "http://backend-3.internal"},
+				},
+				HealthCheck: config.HealthCheck{
+					Interval: time.Millisecond,
+					Timeout:  100 * time.Millisecond,
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	healthContext, stopHealthChecks := context.WithCancel(context.Background())
+	gateway.StartHealthChecks(healthContext)
+
+	const workers = 24
+	const requestsPerWorker = 100
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	var failedRequests atomic.Int64
+	group.Add(workers)
+	for range workers {
+		go func() {
+			defer group.Done()
+			<-start
+			for range requestsPerWorker {
+				response := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodGet, "http://gateway.example/work", nil)
+				gateway.ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					failedRequests.Add(1)
+				}
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+	stopHealthChecks()
+	gateway.WaitForHealthChecks()
+
+	if got := failedRequests.Load(); got != 0 {
+		t.Errorf("failed requests = %d, want 0", got)
+	}
+	if got, want := proxiedRequests.Load(), int64(workers*requestsPerWorker); got != want {
+		t.Errorf("proxied requests = %d, want %d", got, want)
+	}
+	for index, backend := range gateway.pools["backend"].balancer.Backends() {
+		if got := backend.ActiveConnections(); got != 0 {
+			t.Errorf("backend %d active connections = %d, want 0", index, got)
+		}
+	}
 }
 
 func eventually(t *testing.T, timeout time.Duration, condition func() bool) {
