@@ -29,6 +29,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("create gateway: %v", err)
 	}
+	healthCheckContext, stopHealthChecks := context.WithCancel(context.Background())
+	defer stopHealthChecks()
+	gateway.StartHealthChecks(healthCheckContext)
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
@@ -62,6 +65,8 @@ func main() {
 				log.Printf("force-close server: %v", closeErr)
 			}
 		}
+		stopHealthChecks()
+		gateway.WaitForHealthChecks()
 		gateway.CloseIdleConnections()
 	}
 }

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -139,6 +140,174 @@ func TestGatewayReturnsNotFoundForUnmatchedPath(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "no route configured") {
 		t.Errorf("body = %q", response.Body.String())
 	}
+}
+
+func TestGatewaySkipsUnhealthyBackends(t *testing.T) {
+	t.Parallel()
+
+	requestedHost := make(chan string, 1)
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requestedHost <- request.URL.Host
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{
+					{URL: "http://backend-1.internal"},
+					{URL: "http://backend-2.internal"},
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+	gateway.pools["backend"].balancer.Backends()[0].SetHealthy(false)
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.example/users", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if got := <-requestedHost; got != "backend-2.internal" {
+		t.Errorf("upstream host = %q, want %q", got, "backend-2.internal")
+	}
+}
+
+func TestGatewayReturnsServiceUnavailableWhenNoBackendIsHealthy(t *testing.T) {
+	t.Parallel()
+
+	gateway := mustGateway(t, config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	})
+	gateway.pools["backend"].balancer.Backends()[0].SetHealthy(false)
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.example/users", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(response.Body.String(), "no healthy backends available") {
+		t.Errorf("body = %q", response.Body.String())
+	}
+	if response.Header().Get(RequestIDHeader) == "" {
+		t.Error("service-unavailable response has no request ID")
+	}
+}
+
+func TestGatewayLeastConnectionsReleasesBackendAfterProxying(t *testing.T) {
+	t.Parallel()
+
+	firstRequestStarted := make(chan struct{})
+	releaseFirstRequest := make(chan struct{})
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "backend-1.internal" {
+			close(firstRequestStarted)
+			<-releaseFirstRequest
+		}
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.LeastConnections,
+				Backends: []config.Backend{
+					{URL: "http://backend-1.internal"},
+					{URL: "http://backend-2.internal"},
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		gateway.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://gateway.example/first", nil))
+	}()
+	<-firstRequestStarted
+
+	secondResponse := httptest.NewRecorder()
+	gateway.ServeHTTP(secondResponse, httptest.NewRequest(http.MethodGet, "http://gateway.example/second", nil))
+	if secondResponse.Code != http.StatusNoContent {
+		t.Errorf("second request status = %d, want %d", secondResponse.Code, http.StatusNoContent)
+	}
+	backends := gateway.pools["backend"].balancer.Backends()
+	if got := backends[0].ActiveConnections(); got != 1 {
+		t.Errorf("first backend active connections = %d, want 1", got)
+	}
+	if got := backends[1].ActiveConnections(); got != 0 {
+		t.Errorf("second backend active connections = %d, want 0", got)
+	}
+
+	close(releaseFirstRequest)
+	<-firstDone
+	if got := backends[0].ActiveConnections(); got != 0 {
+		t.Errorf("first backend active connections after completion = %d, want 0", got)
+	}
+}
+
+func TestGatewayStartsHealthChecks(t *testing.T) {
+	t.Parallel()
+
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/healthz" {
+			t.Errorf("unexpected request path %q", request.URL.Path)
+		}
+		return upstreamResponse(request, http.StatusServiceUnavailable), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+				HealthCheck: config.HealthCheck{
+					Interval: 10 * time.Millisecond,
+					Timeout:  time.Second,
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gateway.StartHealthChecks(ctx)
+	eventually(t, time.Second, func() bool {
+		return !gateway.pools["backend"].balancer.Backends()[0].Healthy()
+	})
+	cancel()
+	gateway.WaitForHealthChecks()
+}
+
+func eventually(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition was not met before timeout")
 }
 
 func mustGateway(t *testing.T, cfg config.Config) *Gateway {

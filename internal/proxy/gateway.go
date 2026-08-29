@@ -12,9 +12,10 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
+	"github.com/codephoenix86/gatex/internal/balancer"
 	"github.com/codephoenix86/gatex/internal/config"
 )
 
@@ -38,15 +39,13 @@ func RequestID(ctx context.Context) string {
 }
 
 // Gateway routes requests to configured backend pools.
-//
-// Pool selection is deliberately simple in this phase: backends within a pool
-// are selected round-robin. The concurrent health-aware strategies belong to
-// the balancer package in the next phase.
 type Gateway struct {
-	routes         []route
-	pools          map[string]*pool
-	requestTimeout time.Duration
-	transport      *http.Transport
+	routes           []route
+	pools            map[string]*pool
+	requestTimeout   time.Duration
+	transport        *http.Transport
+	healthCheckOnce  sync.Once
+	healthChecksDone sync.WaitGroup
 }
 
 type route struct {
@@ -55,13 +54,15 @@ type route struct {
 }
 
 type pool struct {
-	backends []*upstream
-	next     atomic.Uint64
+	balancer      *balancer.Pool
+	upstreams     []*upstream
+	healthChecker *balancer.HealthChecker
 }
 
 type upstream struct {
-	target *url.URL
-	proxy  *httputil.ReverseProxy
+	backend *balancer.Backend
+	target  *url.URL
+	proxy   *httputil.ReverseProxy
 }
 
 // NewGateway validates cfg and creates a gateway with a tuned shared transport.
@@ -89,15 +90,39 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 	}
 
 	for name, configuredPool := range cfg.BackendPools {
-		backendPool := &pool{backends: make([]*upstream, 0, len(configuredPool.Backends))}
+		urls := make([]string, 0, len(configuredPool.Backends))
 		for _, configuredBackend := range configuredPool.Backends {
+			urls = append(urls, configuredBackend.URL)
+		}
+		balancingPool, err := balancer.NewPoolWithStrategy(urls, balancer.Strategy(configuredPool.Strategy))
+		if err != nil {
+			return nil, fmt.Errorf("create balancer pool %q: %w", name, err)
+		}
+		healthChecker, err := balancer.NewHealthChecker(
+			configuredPool.HealthCheck.Interval,
+			configuredPool.HealthCheck.Timeout,
+			configuredPool.HealthCheck.Path,
+			&http.Client{Transport: transport},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create health checker for pool %q: %w", name, err)
+		}
+		balancedBackends := balancingPool.Backends()
+
+		backendPool := &pool{
+			balancer:      balancingPool,
+			upstreams:     make([]*upstream, 0, len(configuredPool.Backends)),
+			healthChecker: healthChecker,
+		}
+		for index, configuredBackend := range configuredPool.Backends {
 			target, err := url.Parse(configuredBackend.URL)
 			if err != nil {
 				return nil, fmt.Errorf("parse backend %q in pool %q: %w", configuredBackend.URL, name, err)
 			}
-			backendPool.backends = append(backendPool.backends, &upstream{
-				target: target,
-				proxy:  newReverseProxy(target, transport),
+			backendPool.upstreams = append(backendPool.upstreams, &upstream{
+				backend: balancedBackends[index],
+				target:  target,
+				proxy:   newReverseProxy(target, transport),
 			})
 		}
 		gateway.pools[name] = backendPool
@@ -111,6 +136,27 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 	}
 
 	return gateway, nil
+}
+
+// StartHealthChecks starts one health-check loop for every backend pool. The
+// supplied context controls their lifetime; subsequent calls have no effect.
+func (g *Gateway) StartHealthChecks(ctx context.Context) {
+	g.healthCheckOnce.Do(func() {
+		for _, backendPool := range g.pools {
+			done := backendPool.healthChecker.Start(ctx, backendPool.balancer)
+			g.healthChecksDone.Add(1)
+			go func() {
+				defer g.healthChecksDone.Done()
+				<-done
+			}()
+		}
+	})
+}
+
+// WaitForHealthChecks waits for health-check loops started by
+// StartHealthChecks to exit.
+func (g *Gateway) WaitForHealthChecks() {
+	g.healthChecksDone.Wait()
 }
 
 // NewTransport builds the shared upstream transport. Explicit timeouts from
@@ -161,7 +207,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	request := r.Clone(ctx)
 	request.Header.Set(RequestIDHeader, requestID)
-	matchedRoute.pool.nextBackend().proxy.ServeHTTP(w, request)
+	upstream, ok := matchedRoute.pool.acquire()
+	if !ok {
+		w.Header().Set(RequestIDHeader, requestID)
+		http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
+		return
+	}
+	defer upstream.backend.Release()
+	upstream.proxy.ServeHTTP(w, request)
 }
 
 func (g *Gateway) matchRoute(path string) *route {
@@ -178,9 +231,21 @@ func (g *Gateway) matchRoute(path string) *route {
 	return matched
 }
 
-func (p *pool) nextBackend() *upstream {
-	index := p.next.Add(1) - 1
-	return p.backends[index%uint64(len(p.backends))]
+func (p *pool) acquire() (*upstream, bool) {
+	backend, ok := p.balancer.Acquire()
+	if !ok {
+		return nil, false
+	}
+	for _, upstream := range p.upstreams {
+		if upstream.backend == backend {
+			return upstream, true
+		}
+	}
+
+	// A pool is constructed from matching backend and upstream slices, so this
+	// path is unreachable unless that construction invariant is broken.
+	backend.Release()
+	return nil, false
 }
 
 func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
