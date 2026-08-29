@@ -1,2 +1,2 @@
-// Package balancer will select healthy backends from configured pools safely.
+// Package balancer owns concurrency-safe backend state and backend selection.
 package balancer
