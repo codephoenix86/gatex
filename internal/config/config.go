@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -150,6 +151,9 @@ func validateHealthCheck(poolName string, check HealthCheck) error {
 }
 
 func validateRateLimit(name string, limit RateLimit) error {
+	if math.IsNaN(limit.RequestsPerSecond) || math.IsInf(limit.RequestsPerSecond, 0) {
+		return fmt.Errorf("%s requests_per_second must be finite", name)
+	}
 	if limit.RequestsPerSecond < 0 {
 		return fmt.Errorf("%s requests_per_second cannot be negative", name)
 	}

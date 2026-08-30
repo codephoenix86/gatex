@@ -7,16 +7,20 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/codephoenix86/gatex/internal/balancer"
 	"github.com/codephoenix86/gatex/internal/config"
+	"github.com/codephoenix86/gatex/internal/ratelimiter"
 )
 
 const (
@@ -49,8 +53,10 @@ type Gateway struct {
 }
 
 type route struct {
-	pathPrefix string
-	pool       *pool
+	pathPrefix       string
+	pool             *pool
+	limiter          *ratelimiter.ClientLimiter
+	retryAfterHeader string
 }
 
 type pool struct {
@@ -129,10 +135,23 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 	}
 
 	for _, configuredRoute := range cfg.Routes {
-		gateway.routes = append(gateway.routes, route{
+		gatewayRoute := route{
 			pathPrefix: configuredRoute.PathPrefix,
 			pool:       gateway.pools[configuredRoute.BackendPool],
-		})
+		}
+		limit := cfg.RateLimit
+		if configuredRoute.RateLimit != nil {
+			limit = *configuredRoute.RateLimit
+		}
+		if limit.RequestsPerSecond > 0 {
+			limiter, err := ratelimiter.NewClientLimiter(limit.RequestsPerSecond, limit.Burst)
+			if err != nil {
+				return nil, fmt.Errorf("create rate limiter for route %q: %w", configuredRoute.PathPrefix, err)
+			}
+			gatewayRoute.limiter = limiter
+			gatewayRoute.retryAfterHeader = retryAfterValue(limit.RequestsPerSecond)
+		}
+		gateway.routes = append(gateway.routes, gatewayRoute)
 	}
 
 	return gateway, nil
@@ -201,6 +220,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := incomingOrNewRequestID(r.Header.Get(RequestIDHeader))
+	if matchedRoute.limiter != nil && !matchedRoute.limiter.Allow(clientKeyFromRemoteAddr(r.RemoteAddr)) {
+		w.Header().Set(RequestIDHeader, requestID)
+		w.Header().Set("Retry-After", matchedRoute.retryAfterHeader)
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), g.requestTimeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, requestIDContextKey{}, requestID)
@@ -312,6 +338,29 @@ func joinPath(base, path string) string {
 
 func prefixMatches(prefix, path string) bool {
 	return prefix == "/" || path == prefix || strings.HasPrefix(path, strings.TrimRight(prefix, "/")+"/")
+}
+
+func clientKeyFromRemoteAddr(remoteAddr string) string {
+	// Forwarded headers are intentionally ignored until the gateway can be
+	// configured with trusted proxies; otherwise clients could spoof keys.
+	if address, err := netip.ParseAddrPort(remoteAddr); err == nil {
+		return address.Addr().Unmap().String()
+	}
+	if address, err := netip.ParseAddr(remoteAddr); err == nil {
+		return address.Unmap().String()
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+func retryAfterValue(requestsPerSecond float64) string {
+	seconds := math.Ceil(1 / requestsPerSecond)
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds >= float64(math.MaxInt64) {
+		return strconv.FormatInt(math.MaxInt64, 10)
+	}
+	return strconv.FormatInt(int64(seconds), 10)
 }
 
 func incomingOrNewRequestID(incoming string) string {

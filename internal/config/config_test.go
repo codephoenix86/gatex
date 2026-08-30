@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,20 @@ func TestValidate(t *testing.T) {
 				cfg.RateLimit = RateLimit{RequestsPerSecond: 10}
 			},
 			wantErr: "must both be set",
+		},
+		{
+			name: "NaN rate limit",
+			mutate: func(cfg *Config) {
+				cfg.RateLimit = RateLimit{RequestsPerSecond: math.NaN(), Burst: 1}
+			},
+			wantErr: "must be finite",
+		},
+		{
+			name: "infinite route rate limit",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].RateLimit = &RateLimit{RequestsPerSecond: math.Inf(1), Burst: 1}
+			},
+			wantErr: "must be finite",
 		},
 		{
 			name: "relative health check path",

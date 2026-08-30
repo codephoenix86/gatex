@@ -144,6 +144,153 @@ func TestGatewayReturnsNotFoundForUnmatchedPath(t *testing.T) {
 	}
 }
 
+func TestGatewayEnforcesGlobalRateLimitBeforeAcquiringBackend(t *testing.T) {
+	t.Parallel()
+
+	var upstreamRequests atomic.Int64
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamRequests.Add(1)
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		RateLimit: config.RateLimit{
+			RequestsPerSecond: 0.001,
+			Burst:             1,
+		},
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	firstResponse := serveGatewayRequest(gateway, "/first", "192.0.2.10:1000")
+	if firstResponse.Code != http.StatusNoContent {
+		t.Fatalf("first status = %d, want %d", firstResponse.Code, http.StatusNoContent)
+	}
+
+	secondResponse := serveGatewayRequest(gateway, "/second", "192.0.2.10:2000")
+	if secondResponse.Code != http.StatusTooManyRequests {
+		t.Errorf("second status = %d, want %d", secondResponse.Code, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(secondResponse.Body.String(), "rate limit exceeded") {
+		t.Errorf("second body = %q", secondResponse.Body.String())
+	}
+	if got := secondResponse.Header().Get("Retry-After"); got != "1000" {
+		t.Errorf("Retry-After = %q, want %q", got, "1000")
+	}
+	if secondResponse.Header().Get(RequestIDHeader) == "" {
+		t.Error("rate-limited response has no request ID")
+	}
+	if got := upstreamRequests.Load(); got != 1 {
+		t.Errorf("upstream requests = %d, want 1", got)
+	}
+	if got := gateway.pools["backend"].balancer.Backends()[0].ActiveConnections(); got != 0 {
+		t.Errorf("active backend connections = %d, want 0", got)
+	}
+}
+
+func TestGatewayRateLimitsClientsIndependently(t *testing.T) {
+	t.Parallel()
+
+	gateway := mustSuccessfulGateway(t, rateLimitedConfig(config.RateLimit{RequestsPerSecond: 0.0001, Burst: 1}))
+
+	if response := serveGatewayRequest(gateway, "/first", "192.0.2.10:1000"); response.Code != http.StatusNoContent {
+		t.Fatalf("first client status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response := serveGatewayRequest(gateway, "/second", "192.0.2.11:1000"); response.Code != http.StatusNoContent {
+		t.Errorf("second client status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response := serveGatewayRequest(gateway, "/third", "192.0.2.10:2000"); response.Code != http.StatusTooManyRequests {
+		t.Errorf("first client repeat status = %d, want %d", response.Code, http.StatusTooManyRequests)
+	}
+}
+
+func TestGatewayAppliesRouteRateLimitOverride(t *testing.T) {
+	t.Parallel()
+
+	strictLimit := config.RateLimit{RequestsPerSecond: 0.0001, Burst: 1}
+	gateway := mustSuccessfulGateway(t, config.Config{
+		ListenAddress: ":8080",
+		RateLimit:     config.RateLimit{RequestsPerSecond: 0.0001, Burst: 2},
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{
+			{PathPrefix: "/strict", BackendPool: "backend", RateLimit: &strictLimit},
+			{PathPrefix: "/default", BackendPool: "backend"},
+		},
+	})
+	client := "192.0.2.10:1000"
+
+	wantStatuses := []struct {
+		path   string
+		status int
+	}{
+		{path: "/strict/one", status: http.StatusNoContent},
+		{path: "/strict/two", status: http.StatusTooManyRequests},
+		{path: "/default/one", status: http.StatusNoContent},
+		{path: "/default/two", status: http.StatusNoContent},
+		{path: "/default/three", status: http.StatusTooManyRequests},
+	}
+	for _, want := range wantStatuses {
+		if response := serveGatewayRequest(gateway, want.path, client); response.Code != want.status {
+			t.Errorf("%s status = %d, want %d", want.path, response.Code, want.status)
+		}
+	}
+}
+
+func TestGatewayRouteCanDisableGlobalRateLimit(t *testing.T) {
+	t.Parallel()
+
+	disabledLimit := config.RateLimit{}
+	gateway := mustSuccessfulGateway(t, config.Config{
+		ListenAddress: ":8080",
+		RateLimit:     config.RateLimit{RequestsPerSecond: 0.0001, Burst: 1},
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{
+			{PathPrefix: "/open", BackendPool: "backend", RateLimit: &disabledLimit},
+		},
+	})
+
+	for requestNumber := range 3 {
+		response := serveGatewayRequest(gateway, "/open", "192.0.2.10:1000")
+		if response.Code != http.StatusNoContent {
+			t.Errorf("request %d status = %d, want %d", requestNumber+1, response.Code, http.StatusNoContent)
+		}
+	}
+}
+
+func TestClientKeyFromRemoteAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		remoteAddr string
+		want       string
+	}{
+		{remoteAddr: "192.0.2.10:1234", want: "192.0.2.10"},
+		{remoteAddr: "192.0.2.10", want: "192.0.2.10"},
+		{remoteAddr: "[2001:0db8::1]:1234", want: "2001:db8::1"},
+		{remoteAddr: "[::ffff:192.0.2.10]:1234", want: "192.0.2.10"},
+		{remoteAddr: " backend-client ", want: "backend-client"},
+		{remoteAddr: "", want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.remoteAddr, func(t *testing.T) {
+			t.Parallel()
+			if got := clientKeyFromRemoteAddr(test.remoteAddr); got != test.want {
+				t.Errorf("clientKeyFromRemoteAddr(%q) = %q, want %q", test.remoteAddr, got, test.want)
+			}
+		})
+	}
+}
+
 func TestGatewaySkipsUnhealthyBackends(t *testing.T) {
 	t.Parallel()
 
@@ -393,6 +540,37 @@ func mustGateway(t *testing.T, cfg config.Config) *Gateway {
 		t.Fatalf("NewGateway() error = %v", err)
 	}
 	return gateway
+}
+
+func mustSuccessfulGateway(t *testing.T, cfg config.Config) *Gateway {
+	t.Helper()
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	gateway, err := NewGatewayWithTransport(cfg, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+	return gateway
+}
+
+func rateLimitedConfig(limit config.RateLimit) config.Config {
+	return config.Config{
+		ListenAddress: ":8080",
+		RateLimit:     limit,
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}
+}
+
+func serveGatewayRequest(gateway *Gateway, path, remoteAddr string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example"+path, nil)
+	request.RemoteAddr = remoteAddr
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	return response
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
