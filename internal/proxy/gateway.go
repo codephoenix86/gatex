@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/codephoenix86/gatex/internal/balancer"
+	"github.com/codephoenix86/gatex/internal/breaker"
 	"github.com/codephoenix86/gatex/internal/config"
 	"github.com/codephoenix86/gatex/internal/ratelimiter"
 )
@@ -60,9 +61,10 @@ type route struct {
 }
 
 type pool struct {
-	balancer      *balancer.Pool
-	upstreams     []*upstream
-	healthChecker *balancer.HealthChecker
+	balancer       *balancer.Pool
+	circuitBreaker *breaker.Breaker
+	upstreams      []*upstream
+	healthChecker  *balancer.HealthChecker
 }
 
 type upstream struct {
@@ -116,9 +118,10 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 		balancedBackends := balancingPool.Backends()
 
 		backendPool := &pool{
-			balancer:      balancingPool,
-			upstreams:     make([]*upstream, 0, len(configuredPool.Backends)),
-			healthChecker: healthChecker,
+			balancer:       balancingPool,
+			circuitBreaker: breaker.New(),
+			upstreams:      make([]*upstream, 0, len(configuredPool.Backends)),
+			healthChecker:  healthChecker,
 		}
 		for index, configuredBackend := range configuredPool.Backends {
 			target, err := url.Parse(configuredBackend.URL)

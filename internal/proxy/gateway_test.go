@@ -12,8 +12,59 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codephoenix86/gatex/internal/breaker"
 	"github.com/codephoenix86/gatex/internal/config"
 )
+
+func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"users": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://users.internal"}},
+			},
+			"orders": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://orders.internal"}},
+			},
+		},
+		Routes: []config.Route{
+			{PathPrefix: "/users", BackendPool: "users"},
+			{PathPrefix: "/orders", BackendPool: "orders"},
+		},
+	}
+	gateway, err := NewGatewayWithTransport(cfg, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return upstreamResponse(request, http.StatusOK), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	usersBreaker := gateway.pools["users"].circuitBreaker
+	ordersBreaker := gateway.pools["orders"].circuitBreaker
+	if usersBreaker == nil || ordersBreaker == nil {
+		t.Fatal("gateway pool has nil circuit breaker")
+	}
+	if usersBreaker == ordersBreaker {
+		t.Fatal("backend pools share one circuit breaker")
+	}
+	if got := usersBreaker.State(); got != breaker.StateClosed {
+		t.Errorf("users breaker state = %s, want %s", got, breaker.StateClosed)
+	}
+	if got := ordersBreaker.State(); got != breaker.StateClosed {
+		t.Errorf("orders breaker state = %s, want %s", got, breaker.StateClosed)
+	}
+
+	if err := usersBreaker.TransitionTo(breaker.StateOpen); err != nil {
+		t.Fatalf("open users breaker: %v", err)
+	}
+	if got := ordersBreaker.State(); got != breaker.StateClosed {
+		t.Errorf("orders breaker state after users transition = %s, want %s", got, breaker.StateClosed)
+	}
+}
 
 func TestGatewayRoutesAndRewritesRequests(t *testing.T) {
 	t.Parallel()
