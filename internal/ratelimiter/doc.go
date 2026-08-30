@@ -1,2 +1,2 @@
-// Package ratelimiter will provide per-client token-bucket limiting.
+// Package ratelimiter provides concurrency-safe token-bucket rate limiting.
 package ratelimiter
