@@ -26,32 +26,47 @@ func NewBucket(tokensPerSecond float64, burst int) (*Bucket, error) {
 }
 
 func newBucket(tokensPerSecond float64, burst int, now func() time.Time) (*Bucket, error) {
-	if tokensPerSecond <= 0 || math.IsNaN(tokensPerSecond) || math.IsInf(tokensPerSecond, 0) {
-		return nil, fmt.Errorf("tokens per second must be finite and greater than zero")
-	}
-	if burst <= 0 {
-		return nil, fmt.Errorf("burst must be greater than zero")
+	if err := validateBucketConfig(tokensPerSecond, burst); err != nil {
+		return nil, err
 	}
 	if now == nil {
 		return nil, fmt.Errorf("clock cannot be nil")
 	}
 
+	return newBucketAt(tokensPerSecond, burst, now, now()), nil
+}
+
+func newBucketAt(tokensPerSecond float64, burst int, now func() time.Time, startedAt time.Time) *Bucket {
 	capacity := float64(burst)
 	return &Bucket{
 		tokensPerSecond: tokensPerSecond,
 		capacity:        capacity,
 		tokens:          capacity,
-		lastRefill:      now(),
+		lastRefill:      startedAt,
 		now:             now,
-	}, nil
+	}
+}
+
+func validateBucketConfig(tokensPerSecond float64, burst int) error {
+	if tokensPerSecond <= 0 || math.IsNaN(tokensPerSecond) || math.IsInf(tokensPerSecond, 0) {
+		return fmt.Errorf("tokens per second must be finite and greater than zero")
+	}
+	if burst <= 0 {
+		return fmt.Errorf("burst must be greater than zero")
+	}
+	return nil
 }
 
 // Allow reports whether one token is available and consumes it when allowed.
 func (b *Bucket) Allow() bool {
+	return b.allowAt(b.now())
+}
+
+func (b *Bucket) allowAt(now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.refill(b.now())
+	b.refill(now)
 	if b.tokens < 1 {
 		return false
 	}
