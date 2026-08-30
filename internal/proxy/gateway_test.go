@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,77 @@ func TestGatewayRateLimitsClientsIndependently(t *testing.T) {
 	}
 	if response := serveGatewayRequest(gateway, "/third", "192.0.2.10:2000"); response.Code != http.StatusTooManyRequests {
 		t.Errorf("first client repeat status = %d, want %d", response.Code, http.StatusTooManyRequests)
+	}
+}
+
+func TestGatewayEnforcesPerClientBurstsUnderConcurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	const (
+		clients           = 32
+		burst             = 10
+		requestsPerClient = 40
+	)
+	var upstreamRequests atomic.Int64
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamRequests.Add(1)
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	gateway, err := NewGatewayWithTransport(rateLimitedConfig(config.RateLimit{
+		RequestsPerSecond: 0.000001,
+		Burst:             burst,
+	}), transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	var allowed atomic.Int64
+	var rejected atomic.Int64
+	var invalidResponses atomic.Int64
+	group.Add(clients * requestsPerClient)
+	for client := range clients {
+		remoteIP := fmt.Sprintf("192.0.2.%d", client+1)
+		for requestNumber := range requestsPerClient {
+			remoteAddr := fmt.Sprintf("%s:%d", remoteIP, requestNumber+1000)
+			go func() {
+				defer group.Done()
+				<-start
+				response := serveGatewayRequest(gateway, "/work", remoteAddr)
+				switch response.Code {
+				case http.StatusNoContent:
+					allowed.Add(1)
+				case http.StatusTooManyRequests:
+					rejected.Add(1)
+					if response.Header().Get(RequestIDHeader) == "" || response.Header().Get("Retry-After") == "" {
+						invalidResponses.Add(1)
+					}
+				default:
+					invalidResponses.Add(1)
+				}
+			}()
+		}
+	}
+	close(start)
+	group.Wait()
+
+	wantAllowed := int64(clients * burst)
+	wantRejected := int64(clients * (requestsPerClient - burst))
+	if got := allowed.Load(); got != wantAllowed {
+		t.Errorf("allowed requests = %d, want %d", got, wantAllowed)
+	}
+	if got := rejected.Load(); got != wantRejected {
+		t.Errorf("rejected requests = %d, want %d", got, wantRejected)
+	}
+	if got := invalidResponses.Load(); got != 0 {
+		t.Errorf("invalid responses = %d, want 0", got)
+	}
+	if got := upstreamRequests.Load(); got != wantAllowed {
+		t.Errorf("upstream requests = %d, want %d", got, wantAllowed)
+	}
+	if got := gateway.pools["backend"].balancer.Backends()[0].ActiveConnections(); got != 0 {
+		t.Errorf("active backend connections = %d, want 0", got)
 	}
 }
 

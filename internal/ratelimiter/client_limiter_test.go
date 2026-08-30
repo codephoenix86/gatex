@@ -63,6 +63,33 @@ func TestClientLimiterAllowsAtMostBurstForConcurrentClientRequests(t *testing.T)
 	}
 }
 
+func TestClientLimiterRefillsIndependentClientsUnderConcurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	const (
+		clients           = 32
+		burst             = 4
+		requestsPerClient = 16
+	)
+	clock := newFakeClock(time.Unix(1_700_000_000, 0))
+	limiter := mustClientLimiter(t, 4, burst, clock)
+
+	initialAllowed := runConcurrentClientRequests(limiter, clients, requestsPerClient)
+	for client, allowed := range initialAllowed {
+		if got := allowed.Load(); got != burst {
+			t.Errorf("client %d initial allowed requests = %d, want %d", client, got, burst)
+		}
+	}
+
+	clock.Advance(500 * time.Millisecond)
+	refillAllowed := runConcurrentClientRequests(limiter, clients, requestsPerClient)
+	for client, allowed := range refillAllowed {
+		if got := allowed.Load(); got != 2 {
+			t.Errorf("client %d allowed requests after refill = %d, want 2", client, got)
+		}
+	}
+}
+
 func TestClientLimiterRemovesIdleClientsOpportunistically(t *testing.T) {
 	t.Parallel()
 
@@ -245,4 +272,26 @@ func clientCount(limiter *ClientLimiter) int {
 		shard.mu.Unlock()
 	}
 	return count
+}
+
+func runConcurrentClientRequests(limiter *ClientLimiter, clients, requestsPerClient int) []atomic.Int64 {
+	allowed := make([]atomic.Int64, clients)
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(clients * requestsPerClient)
+	for client := range clients {
+		clientKey := "client-" + strconv.Itoa(client)
+		for range requestsPerClient {
+			go func() {
+				defer group.Done()
+				<-start
+				if limiter.Allow(clientKey) {
+					allowed[client].Add(1)
+				}
+			}()
+		}
+	}
+	close(start)
+	group.Wait()
+	return allowed
 }
