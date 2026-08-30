@@ -87,6 +87,15 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "health_check interval cannot be negative",
 		},
+		{
+			name: "negative circuit breaker failure threshold",
+			mutate: func(cfg *Config) {
+				pool := cfg.BackendPools["users"]
+				pool.CircuitBreaker.FailureThreshold = -1
+				cfg.BackendPools["users"] = pool
+			},
+			wantErr: "circuit_breaker failure_threshold cannot be negative",
+		},
 	}
 
 	for _, test := range tests {

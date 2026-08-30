@@ -116,10 +116,18 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 			return nil, fmt.Errorf("create health checker for pool %q: %w", name, err)
 		}
 		balancedBackends := balancingPool.Backends()
+		failureThreshold := configuredPool.CircuitBreaker.FailureThreshold
+		if failureThreshold == 0 {
+			failureThreshold = breaker.DefaultFailureThreshold
+		}
+		circuitBreaker, err := breaker.NewWithFailureThreshold(failureThreshold)
+		if err != nil {
+			return nil, fmt.Errorf("create circuit breaker for pool %q: %w", name, err)
+		}
 
 		backendPool := &pool{
 			balancer:       balancingPool,
-			circuitBreaker: breaker.New(),
+			circuitBreaker: circuitBreaker,
 			upstreams:      make([]*upstream, 0, len(configuredPool.Backends)),
 			healthChecker:  healthChecker,
 		}
@@ -131,7 +139,7 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 			backendPool.upstreams = append(backendPool.upstreams, &upstream{
 				backend: balancedBackends[index],
 				target:  target,
-				proxy:   newReverseProxy(target, transport),
+				proxy:   newReverseProxy(target, transport, circuitBreaker),
 			})
 		}
 		gateway.pools[name] = backendPool
@@ -277,7 +285,7 @@ func (p *pool) acquire() (*upstream, bool) {
 	return nil, false
 }
 
-func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
+func newReverseProxy(target *url.URL, transport http.RoundTripper, circuitBreaker *breaker.Breaker) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Director: func(request *http.Request) {
 			originalHost := request.Host
@@ -293,11 +301,17 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.Rev
 		},
 		Transport: transport,
 		ModifyResponse: func(response *http.Response) error {
+			if response.StatusCode >= http.StatusInternalServerError && response.StatusCode < 600 {
+				circuitBreaker.RecordFailure()
+			} else {
+				circuitBreaker.RecordSuccess()
+			}
 			response.Header.Set(RequestIDHeader, RequestID(response.Request.Context()))
 			response.Header.Set("X-Gateway", "gatex")
 			return nil
 		},
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
+			circuitBreaker.RecordFailure()
 			status := http.StatusBadGateway
 			message := "upstream request failed"
 			if errors.Is(request.Context().Err(), context.DeadlineExceeded) {

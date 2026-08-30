@@ -66,6 +66,83 @@ func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
 	}
 }
 
+func TestGatewayTripsCircuitBreakerAfterConsecutiveUpstreamFailures(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call == 3 {
+			return upstreamResponse(request, http.StatusNoContent), nil
+		}
+		return upstreamResponse(request, http.StatusBadGateway), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy:       config.RoundRobin,
+				Backends:       []config.Backend{{URL: "http://backend.internal"}},
+				CircuitBreaker: config.CircuitBreaker{FailureThreshold: 3},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	wantFailures := []int{1, 2, 0, 1, 2, 3}
+	for index, wantFailureCount := range wantFailures {
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.example/work", nil))
+
+		wantStatus := http.StatusBadGateway
+		if index == 2 {
+			wantStatus = http.StatusNoContent
+		}
+		if response.Code != wantStatus {
+			t.Fatalf("request %d status = %d, want %d", index+1, response.Code, wantStatus)
+		}
+		if got := gateway.pools["backend"].circuitBreaker.ConsecutiveFailures(); got != wantFailureCount {
+			t.Fatalf("failure count after request %d = %d, want %d", index+1, got, wantFailureCount)
+		}
+	}
+	if got := gateway.pools["backend"].circuitBreaker.State(); got != breaker.StateOpen {
+		t.Errorf("breaker state = %s, want %s", got, breaker.StateOpen)
+	}
+}
+
+func TestGatewayRecordsTransportErrorsAsCircuitBreakerFailures(t *testing.T) {
+	t.Parallel()
+
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy:       config.RoundRobin,
+				Backends:       []config.Backend{{URL: "http://backend.internal"}},
+				CircuitBreaker: config.CircuitBreaker{FailureThreshold: 1},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("dial backend: connection refused")
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.example/work", nil))
+	if response.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", response.Code, http.StatusBadGateway)
+	}
+	if got := gateway.pools["backend"].circuitBreaker.State(); got != breaker.StateOpen {
+		t.Errorf("breaker state = %s, want %s", got, breaker.StateOpen)
+	}
+}
+
 func TestGatewayRoutesAndRewritesRequests(t *testing.T) {
 	t.Parallel()
 

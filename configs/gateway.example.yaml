@@ -20,11 +20,15 @@ backend_pools:
       path: /healthz
       interval: 10s
       timeout: 2s
+    circuit_breaker:
+      failure_threshold: 5
     backends:
       - url: http://users-1:8080
       - url: http://users-2:8080
   orders:
     strategy: least_connections
+    circuit_breaker:
+      failure_threshold: 5
     backends:
       - url: http://orders-1:8080
 

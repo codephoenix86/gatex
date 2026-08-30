@@ -7,6 +7,10 @@ import (
 )
 
 var (
+	// ErrInvalidFailureThreshold indicates that a breaker was configured with
+	// no failures required to trip it.
+	ErrInvalidFailureThreshold = errors.New("circuit breaker failure threshold must be greater than zero")
+
 	// ErrInvalidState indicates that a transition target is not a recognized
 	// circuit-breaker state.
 	ErrInvalidState = errors.New("circuit breaker state is invalid")
@@ -15,6 +19,10 @@ var (
 	// bypass part of the circuit-breaker recovery cycle.
 	ErrInvalidTransition = errors.New("circuit breaker transition is invalid")
 )
+
+// DefaultFailureThreshold is used when a backend pool does not configure its
+// own consecutive-failure threshold.
+const DefaultFailureThreshold = 5
 
 // State describes whether a circuit breaker permits normal traffic, rejects
 // it, or is testing whether its dependency has recovered.
@@ -48,13 +56,30 @@ func (s State) String() string {
 // Breaker owns the state machine for one backend pool. Its methods are safe
 // for concurrent request and health-management goroutines.
 type Breaker struct {
-	mu    sync.RWMutex
-	state State
+	mu                  sync.RWMutex
+	state               State
+	failureThreshold    int
+	consecutiveFailures int
 }
 
-// New creates a circuit breaker in the closed state.
+// New creates a closed circuit breaker with DefaultFailureThreshold.
 func New() *Breaker {
-	return &Breaker{state: StateClosed}
+	return &Breaker{
+		state:            StateClosed,
+		failureThreshold: DefaultFailureThreshold,
+	}
+}
+
+// NewWithFailureThreshold creates a closed circuit breaker that opens after
+// failureThreshold consecutive failures.
+func NewWithFailureThreshold(failureThreshold int) (*Breaker, error) {
+	if failureThreshold <= 0 {
+		return nil, ErrInvalidFailureThreshold
+	}
+	return &Breaker{
+		state:            StateClosed,
+		failureThreshold: failureThreshold,
+	}, nil
 }
 
 // State reports the breaker's current state.
@@ -62,6 +87,39 @@ func (b *Breaker) State() State {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.state
+}
+
+// ConsecutiveFailures reports the current closed-state failure streak.
+func (b *Breaker) ConsecutiveFailures() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.consecutiveFailures
+}
+
+// RecordSuccess clears a closed breaker's consecutive-failure streak. Results
+// that complete after the breaker has left the closed state are ignored.
+func (b *Breaker) RecordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == StateClosed {
+		b.consecutiveFailures = 0
+	}
+}
+
+// RecordFailure adds to a closed breaker's consecutive-failure streak and
+// opens it when the configured threshold is reached. Results that complete
+// after the breaker has left the closed state are ignored.
+func (b *Breaker) RecordFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state != StateClosed {
+		return
+	}
+
+	b.consecutiveFailures++
+	if b.consecutiveFailures >= b.failureThreshold {
+		b.state = StateOpen
+	}
 }
 
 // TransitionTo moves the breaker along a valid state-machine edge. Repeating
@@ -82,6 +140,9 @@ func (b *Breaker) TransitionTo(next State) error {
 		return fmt.Errorf("%w: %s to %s", ErrInvalidTransition, b.state, next)
 	}
 	b.state = next
+	if next == StateClosed {
+		b.consecutiveFailures = 0
+	}
 	return nil
 }
 

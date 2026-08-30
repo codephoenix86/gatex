@@ -43,9 +43,10 @@ type RateLimit struct {
 
 // Pool groups interchangeable upstreams and selects a balancing strategy.
 type Pool struct {
-	Strategy    string      `yaml:"strategy"`
-	Backends    []Backend   `yaml:"backends"`
-	HealthCheck HealthCheck `yaml:"health_check"`
+	Strategy       string         `yaml:"strategy"`
+	Backends       []Backend      `yaml:"backends"`
+	HealthCheck    HealthCheck    `yaml:"health_check"`
+	CircuitBreaker CircuitBreaker `yaml:"circuit_breaker"`
 }
 
 // Backend identifies an upstream base URL.
@@ -59,6 +60,12 @@ type HealthCheck struct {
 	Path     string        `yaml:"path"`
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
+}
+
+// CircuitBreaker controls when upstream failures stop normal traffic to a
+// backend pool. A zero failure threshold uses the breaker's default.
+type CircuitBreaker struct {
+	FailureThreshold int `yaml:"failure_threshold"`
 }
 
 // Route maps a path prefix to one named backend pool.
@@ -115,6 +122,9 @@ func (c Config) Validate() error {
 		}
 		if err := validateHealthCheck(name, pool.HealthCheck); err != nil {
 			return err
+		}
+		if pool.CircuitBreaker.FailureThreshold < 0 {
+			return fmt.Errorf("backend pool %q circuit_breaker failure_threshold cannot be negative", name)
 		}
 	}
 
