@@ -16,26 +16,68 @@ later be used only for local admin and health endpoints.
 client
   |
   v
-gateway HTTP server
-  |-- recovery -> request ID/logging -> auth -> rate limit -> cache
-  |                                                        |
-  v                                                        v
-route matcher (YAML routes) -------------------------> cache hit -> client
+panic recovery
   |
   v
-backend pool -> circuit breaker -> load balancer -> healthy backend
+structured request/response logging
   |
   v
-ReverseProxy (configured transport, deadline, request ID)
+CORS ------------------------------------> preflight response -> client
   |
   v
-backend response -> response hooks / metrics -> client
+route matcher (YAML routes)
+  |
+  v
+API-key auth (protected routes only)
+  |
+  v
+per-client rate limit
+  |
+  v
+request deadline + request ID
+  |
+  v
+pool circuit breaker -> load balancer -> healthy backend
+  |
+  v
+ReverseProxy (configured transport) -> backend -> client
 ```
 
 Routes are configuration-driven, not hardcoded. Changing a prefix, target pool,
 or operational limit should require a config change and restart rather than a
 code change. This keeps the gateway reusable for multiple services while keeping
 runtime configuration reload out of the initial scope.
+
+## Middleware order
+
+`middleware.Chain` treats the first item as the outermost handler. Gatex uses
+two composition points: process-wide middleware wraps the route matcher, and
+each matched route wraps its proxy handler with route-specific policy. Together
+they produce this order:
+
+1. **Recovery** is outermost so a panic from any later middleware or handler is
+   contained and converted to a generic `500` response.
+2. **Structured logging** wraps every outcome—including CORS preflights,
+   authentication failures, rate-limit rejections, and upstream responses—so
+   status and latency describe the whole gateway request.
+3. **CORS** runs before route policy so browser preflights do not require an API
+   key or consume rate-limit capacity. It also places CORS headers on downstream
+   success and error responses.
+4. **Route matching** selects the backend pool and the route-specific policy
+   before authentication is enforced.
+5. **API-key authentication** runs only for protected routes and precedes the
+   limiter, so rejected credentials do not consume the quota reserved for
+   authenticated traffic. A deployment exposed to credential-guessing floods
+   should add a separate coarse IP limiter before authentication.
+6. **Rate limiting** rejects excess authenticated or public-route traffic
+   before a circuit-breaker permit, backend slot, or upstream connection is
+   acquired.
+7. **Proxy handling** adds the request deadline and request ID, checks the pool
+   circuit breaker, selects a healthy backend, and performs the upstream call.
+
+Responses unwind through the same handlers in reverse order. In particular,
+the access logger observes the final status and latency after the inner request
+path completes.
 
 ## Deliberate library choices
 

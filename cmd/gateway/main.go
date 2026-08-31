@@ -39,19 +39,8 @@ func main() {
 	gateway.StartHealthChecks(healthCheckContext)
 
 	server := &http.Server{
-		Addr: cfg.ListenAddress,
-		Handler: middleware.Chain(
-			middleware.Recovery(logger),
-			middleware.RequestLogger(logger),
-			middleware.CORS(middleware.CORSOptions{
-				AllowedOrigins:   cfg.CORS.AllowedOrigins,
-				AllowedMethods:   cfg.CORS.AllowedMethods,
-				AllowedHeaders:   cfg.CORS.AllowedHeaders,
-				ExposedHeaders:   cfg.CORS.ExposedHeaders,
-				AllowCredentials: cfg.CORS.AllowCredentials,
-				MaxAge:           cfg.CORS.MaxAge,
-			}),
-		)(gateway),
+		Addr:              cfg.ListenAddress,
+		Handler:           newGatewayHandler(cfg, logger, gateway),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       cfg.Timeouts.IdleConnection,
 	}
@@ -85,4 +74,22 @@ func main() {
 		gateway.WaitForHealthChecks()
 		gateway.CloseIdleConnections()
 	}
+}
+
+// newGatewayHandler declares process-wide middleware from outermost to
+// innermost. Route-specific authentication and rate limiting are composed by
+// proxy.NewGateway after route matching.
+func newGatewayHandler(cfg config.Config, logger *slog.Logger, gateway http.Handler) http.Handler {
+	return middleware.Chain(
+		middleware.Recovery(logger),
+		middleware.RequestLogger(logger),
+		middleware.CORS(middleware.CORSOptions{
+			AllowedOrigins:   cfg.CORS.AllowedOrigins,
+			AllowedMethods:   cfg.CORS.AllowedMethods,
+			AllowedHeaders:   cfg.CORS.AllowedHeaders,
+			ExposedHeaders:   cfg.CORS.ExposedHeaders,
+			AllowCredentials: cfg.CORS.AllowCredentials,
+			MaxAge:           cfg.CORS.MaxAge,
+		}),
+	)(gateway)
 }

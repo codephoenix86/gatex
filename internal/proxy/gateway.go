@@ -172,13 +172,17 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 	apiKeyAuth := middleware.APIKeyAuth(cfg.Auth.APIKeys...)
 	for index := range gateway.routes {
 		gatewayRoute := &gateway.routes[index]
+		routeMiddleware := make([]middleware.Middleware, 0, 2)
+		if cfg.Routes[index].Protected {
+			routeMiddleware = append(routeMiddleware, apiKeyAuth)
+		}
+		if gatewayRoute.limiter != nil {
+			routeMiddleware = append(routeMiddleware, gatewayRoute.rateLimit())
+		}
 		handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gateway.serveRoute(w, r, gatewayRoute)
 		}))
-		if cfg.Routes[index].Protected {
-			handler = middleware.Chain(apiKeyAuth)(handler)
-		}
-		gatewayRoute.handler = handler
+		gatewayRoute.handler = middleware.Chain(routeMiddleware...)(handler)
 	}
 
 	return gateway, nil
@@ -251,13 +255,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // call to httputil.ReverseProxy.
 func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRoute *route) {
 	requestID := incomingOrNewRequestID(r.Header.Get(RequestIDHeader))
-	if matchedRoute.limiter != nil && !matchedRoute.limiter.Allow(clientKeyFromRemoteAddr(r.RemoteAddr)) {
-		w.Header().Set(RequestIDHeader, requestID)
-		w.Header().Set("Retry-After", matchedRoute.retryAfterHeader)
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(r.Context(), g.requestTimeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, requestIDContextKey{}, requestID)
@@ -280,6 +277,24 @@ func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRout
 	defer upstream.backend.Release()
 	request = request.WithContext(context.WithValue(request.Context(), breakerPermitContextKey{}, permit))
 	upstream.proxy.ServeHTTP(w, request)
+}
+
+func (r *route) rateLimit() middleware.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			requestID := incomingOrNewRequestID(request.Header.Get(RequestIDHeader))
+			if !r.limiter.Allow(clientKeyFromRemoteAddr(request.RemoteAddr)) {
+				w.Header().Set(RequestIDHeader, requestID)
+				w.Header().Set("Retry-After", r.retryAfterHeader)
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+
+			requestWithID := request.Clone(request.Context())
+			requestWithID.Header.Set(RequestIDHeader, requestID)
+			next.ServeHTTP(w, requestWithID)
+		})
+	}
 }
 
 func (g *Gateway) matchRoute(path string) *route {

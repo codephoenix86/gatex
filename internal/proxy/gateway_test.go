@@ -409,6 +409,52 @@ func TestGatewayAuthenticatesOnlyProtectedRoutes(t *testing.T) {
 	}
 }
 
+func TestGatewayAuthenticatesBeforeConsumingRateLimit(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		Auth:          config.Auth{APIKeys: []string{"valid-key"}},
+		RateLimit: config.RateLimit{
+			RequestsPerSecond: 0.0001,
+			Burst:             1,
+		},
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/protected", BackendPool: "backend", Protected: true}},
+	}, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		return upstreamResponse(request, http.StatusNoContent), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	for _, apiKey := range []string{"", "invalid-key"} {
+		response := serveAuthenticatedGatewayRequest(gateway, "/protected", "192.0.2.1:1000", apiKey)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("request with API key %q status = %d, want %d", apiKey, response.Code, http.StatusUnauthorized)
+		}
+	}
+
+	allowedResponse := serveAuthenticatedGatewayRequest(gateway, "/protected", "192.0.2.1:1000", "valid-key")
+	if allowedResponse.Code != http.StatusNoContent {
+		t.Fatalf("first authenticated status = %d, want %d", allowedResponse.Code, http.StatusNoContent)
+	}
+	limitedResponse := serveAuthenticatedGatewayRequest(gateway, "/protected", "192.0.2.1:1000", "valid-key")
+	if limitedResponse.Code != http.StatusTooManyRequests {
+		t.Errorf("second authenticated status = %d, want %d", limitedResponse.Code, http.StatusTooManyRequests)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1", got)
+	}
+}
+
 func TestGatewayContextDeadlineAndRequestIDReachTransport(t *testing.T) {
 	t.Parallel()
 
@@ -964,6 +1010,17 @@ func rateLimitedConfig(limit config.RateLimit) config.Config {
 func serveGatewayRequest(gateway *Gateway, path, remoteAddr string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.example"+path, nil)
 	request.RemoteAddr = remoteAddr
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	return response
+}
+
+func serveAuthenticatedGatewayRequest(gateway *Gateway, path, remoteAddr, apiKey string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example"+path, nil)
+	request.RemoteAddr = remoteAddr
+	if apiKey != "" {
+		request.Header.Set(middleware.APIKeyHeader, apiKey)
+	}
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	return response
