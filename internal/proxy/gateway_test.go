@@ -143,6 +143,61 @@ func TestGatewayRecordsTransportErrorsAsCircuitBreakerFailures(t *testing.T) {
 	}
 }
 
+func TestGatewayFailsFastWithClearErrorWhenCircuitBreakerIsOpen(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if call := calls.Add(1); call > 1 {
+			t.Errorf("open breaker allowed upstream call %d", call)
+		}
+		return upstreamResponse(request, http.StatusBadGateway), nil
+	})
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+				CircuitBreaker: config.CircuitBreaker{
+					FailureThreshold: 1,
+					OpenTimeout:      time.Minute,
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	tripResponse := serveGatewayRequest(gateway, "/trip", "192.0.2.1:1000")
+	if tripResponse.Code != http.StatusBadGateway {
+		t.Fatalf("trip status = %d, want %d", tripResponse.Code, http.StatusBadGateway)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example/rejected", nil)
+	request.Header.Set(RequestIDHeader, "open-breaker-request")
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("open-breaker status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(response.Body.String(), "backend circuit breaker is open") {
+		t.Errorf("open-breaker body = %q", response.Body.String())
+	}
+	if got := response.Header().Get(RequestIDHeader); got != "open-breaker-request" {
+		t.Errorf("request ID = %q, want %q", got, "open-breaker-request")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1", got)
+	}
+	if got := gateway.pools["backend"].balancer.Backends()[0].ActiveConnections(); got != 0 {
+		t.Errorf("active connections after rejection = %d, want 0", got)
+	}
+}
+
 func TestGatewayLimitsHalfOpenTrafficToConfiguredProbeBatch(t *testing.T) {
 	t.Parallel()
 
@@ -202,6 +257,9 @@ func TestGatewayLimitsHalfOpenTrafficToConfiguredProbeBatch(t *testing.T) {
 	blockedResponse := serveGatewayRequest(gateway, "/blocked", "192.0.2.1:1000")
 	if blockedResponse.Code != http.StatusServiceUnavailable {
 		t.Errorf("request beyond probe limit status = %d, want %d", blockedResponse.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(blockedResponse.Body.String(), "recovery probe limit reached") {
+		t.Errorf("request beyond probe limit body = %q", blockedResponse.Body.String())
 	}
 	if got := calls.Load(); got != 3 {
 		t.Errorf("upstream calls before probe completion = %d, want 3", got)

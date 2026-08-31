@@ -124,14 +124,14 @@ func TestOpenBreakerAdmitsLimitedHalfOpenProbeBatchAfterTimeout(t *testing.T) {
 	}, clock.Now)
 	mustAcquirePermit(t, circuitBreaker).RecordFailure()
 
-	if permit, ok := circuitBreaker.Acquire(); ok || permit != nil {
-		t.Fatalf("Acquire() before timeout = (%v, %t), want (nil, false)", permit, ok)
+	if permit, err := circuitBreaker.Acquire(); !errors.Is(err, ErrOpen) || permit != nil {
+		t.Fatalf("Acquire() before timeout = (%v, %v), want (nil, %v)", permit, err, ErrOpen)
 	}
 	clock.Advance(time.Minute)
 	firstProbe := mustAcquirePermit(t, circuitBreaker)
 	secondProbe := mustAcquirePermit(t, circuitBreaker)
-	if permit, ok := circuitBreaker.Acquire(); ok || permit != nil {
-		t.Fatalf("Acquire() beyond probe limit = (%v, %t), want (nil, false)", permit, ok)
+	if permit, err := circuitBreaker.Acquire(); !errors.Is(err, ErrHalfOpenProbeLimit) || permit != nil {
+		t.Fatalf("Acquire() beyond probe limit = (%v, %v), want (nil, %v)", permit, err, ErrHalfOpenProbeLimit)
 	}
 	if got := circuitBreaker.State(); got != StateHalfOpen {
 		t.Fatalf("State() = %s, want %s", got, StateHalfOpen)
@@ -145,8 +145,8 @@ func TestOpenBreakerAdmitsLimitedHalfOpenProbeBatchAfterTimeout(t *testing.T) {
 	if got := circuitBreaker.State(); got != StateClosed {
 		t.Errorf("State() after successful probe batch = %s, want %s", got, StateClosed)
 	}
-	if permit, ok := circuitBreaker.Acquire(); !ok || permit == nil {
-		t.Errorf("Acquire() after recovery = (%v, %t), want non-nil permit", permit, ok)
+	if permit, err := circuitBreaker.Acquire(); err != nil || permit == nil {
+		t.Errorf("Acquire() after recovery = (%v, %v), want non-nil permit", permit, err)
 	}
 }
 
@@ -169,12 +169,12 @@ func TestFailedHalfOpenProbeReopensBreakerAndRestartsTimeout(t *testing.T) {
 	if got := circuitBreaker.State(); got != StateOpen {
 		t.Fatalf("State() after failed probe = %s, want %s", got, StateOpen)
 	}
-	if permit, ok := circuitBreaker.Acquire(); ok || permit != nil {
-		t.Fatalf("Acquire() after failed probe = (%v, %t), want (nil, false)", permit, ok)
+	if permit, err := circuitBreaker.Acquire(); !errors.Is(err, ErrOpen) || permit != nil {
+		t.Fatalf("Acquire() after failed probe = (%v, %v), want (nil, %v)", permit, err, ErrOpen)
 	}
 	clock.Advance(time.Minute)
-	if permit, ok := circuitBreaker.Acquire(); !ok || permit == nil {
-		t.Errorf("Acquire() after restarted timeout = (%v, %t), want probe permit", permit, ok)
+	if permit, err := circuitBreaker.Acquire(); err != nil || permit == nil {
+		t.Errorf("Acquire() after restarted timeout = (%v, %v), want probe permit", permit, err)
 	}
 }
 
@@ -227,7 +227,7 @@ func TestBreakerLimitsConcurrentHalfOpenAdmission(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			if _, ok := circuitBreaker.Acquire(); ok {
+			if _, err := circuitBreaker.Acquire(); err == nil {
 				admitted.Add(1)
 			}
 		}()
@@ -237,6 +237,31 @@ func TestBreakerLimitsConcurrentHalfOpenAdmission(t *testing.T) {
 
 	if got := admitted.Load(); got != probeLimit {
 		t.Errorf("admitted probes = %d, want %d", got, probeLimit)
+	}
+}
+
+func TestCancelledHalfOpenPermitReleasesProbeSlot(t *testing.T) {
+	t.Parallel()
+
+	clock := newBreakerClock(time.Unix(1_700_000_000, 0))
+	circuitBreaker := mustConfiguredBreaker(t, Config{
+		FailureThreshold:    1,
+		OpenTimeout:         time.Minute,
+		HalfOpenMaxRequests: 1,
+	}, clock.Now)
+	mustAcquirePermit(t, circuitBreaker).RecordFailure()
+	clock.Advance(time.Minute)
+
+	unusedProbe := mustAcquirePermit(t, circuitBreaker)
+	unusedProbe.Cancel()
+	replacementProbe := mustAcquirePermit(t, circuitBreaker)
+	unusedProbe.RecordFailure()
+	if got := circuitBreaker.State(); got != StateHalfOpen {
+		t.Fatalf("State() after cancelled probe result = %s, want %s", got, StateHalfOpen)
+	}
+	replacementProbe.RecordSuccess()
+	if got := circuitBreaker.State(); got != StateClosed {
+		t.Errorf("State() after replacement probe = %s, want %s", got, StateClosed)
 	}
 }
 
@@ -392,9 +417,9 @@ func TestBreakerStateIsSafeUnderConcurrentAccess(t *testing.T) {
 
 func mustAcquirePermit(t *testing.T, circuitBreaker *Breaker) *Permit {
 	t.Helper()
-	permit, ok := circuitBreaker.Acquire()
-	if !ok {
-		t.Fatal("Acquire() rejected request, want permit")
+	permit, err := circuitBreaker.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v, want permit", err)
 	}
 	return permit
 }

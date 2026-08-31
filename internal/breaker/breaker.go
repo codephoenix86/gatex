@@ -8,6 +8,14 @@ import (
 )
 
 var (
+	// ErrOpen indicates that a request arrived before the breaker's recovery
+	// timeout elapsed.
+	ErrOpen = errors.New("circuit breaker is open")
+
+	// ErrHalfOpenProbeLimit indicates that all recovery-probe slots for the
+	// current half-open cycle have already been assigned.
+	ErrHalfOpenProbeLimit = errors.New("circuit breaker half-open probe limit reached")
+
 	// ErrInvalidFailureThreshold indicates that a breaker was configured with
 	// no failures required to trip it.
 	ErrInvalidFailureThreshold = errors.New("circuit breaker failure threshold must be greater than zero")
@@ -168,21 +176,22 @@ func (b *Breaker) ConsecutiveFailures() int {
 
 // Acquire admits normal traffic while closed. Once the open timeout expires,
 // it lazily moves the breaker to half-open and admits at most the configured
-// number of probe requests. The caller must record exactly one outcome on an
+// number of probe requests. It returns ErrOpen or ErrHalfOpenProbeLimit when a
+// request must fail fast. The caller must record one outcome or cancel every
 // admitted Permit.
-func (b *Breaker) Acquire() (*Permit, bool) {
+func (b *Breaker) Acquire() (*Permit, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.state == StateOpen {
 		if b.now().Before(b.openedAt.Add(b.openTimeout)) {
-			return nil, false
+			return nil, ErrOpen
 		}
 		b.transitionLocked(StateHalfOpen)
 	}
 	if b.state == StateHalfOpen {
 		if b.halfOpenAdmitted >= b.halfOpenMaxRequests {
-			return nil, false
+			return nil, ErrHalfOpenProbeLimit
 		}
 		b.halfOpenAdmitted++
 	}
@@ -191,7 +200,7 @@ func (b *Breaker) Acquire() (*Permit, bool) {
 		breaker:    b,
 		generation: b.generation,
 		probe:      b.state == StateHalfOpen,
-	}, true
+	}, nil
 }
 
 // Permit represents one request admitted by a Breaker. A permit accepts only
@@ -213,6 +222,17 @@ func (p *Permit) RecordSuccess() {
 // RecordFailure reports that the permitted upstream request failed.
 func (p *Permit) RecordFailure() {
 	p.record(false)
+}
+
+// Cancel releases an admitted permit when no upstream request was dispatched.
+// In half-open state this makes the unused probe slot available again.
+func (p *Permit) Cancel() {
+	if p == nil || p.breaker == nil {
+		return
+	}
+	p.once.Do(func() {
+		p.breaker.cancel(p.generation, p.probe)
+	})
 }
 
 func (p *Permit) record(success bool) {
@@ -256,6 +276,17 @@ func (b *Breaker) record(generation uint64, probe, success bool) {
 	b.consecutiveFailures++
 	if b.consecutiveFailures == b.failureThreshold {
 		b.transitionLocked(StateOpen)
+	}
+}
+
+func (b *Breaker) cancel(generation uint64, probe bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.generation != generation || !probe || b.state != StateHalfOpen {
+		return
+	}
+	if b.halfOpenAdmitted > 0 {
+		b.halfOpenAdmitted--
 	}
 }
 

@@ -38,6 +38,8 @@ const (
 type requestIDContextKey struct{}
 type breakerPermitContextKey struct{}
 
+var errNoHealthyBackends = errors.New("no healthy backends available")
+
 // RequestID returns the request ID attached by Gateway, if present.
 func RequestID(ctx context.Context) string {
 	id, _ := ctx.Value(requestIDContextKey{}).(string)
@@ -245,10 +247,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	request := r.Clone(ctx)
 	request.Header.Set(RequestIDHeader, requestID)
-	upstream, permit, ok := matchedRoute.pool.acquire()
-	if !ok {
+	upstream, permit, err := matchedRoute.pool.acquire()
+	if err != nil {
 		w.Header().Set(RequestIDHeader, requestID)
-		http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
+		switch {
+		case errors.Is(err, breaker.ErrOpen):
+			http.Error(w, "backend circuit breaker is open", http.StatusServiceUnavailable)
+		case errors.Is(err, breaker.ErrHalfOpenProbeLimit):
+			http.Error(w, "backend circuit breaker is half-open; recovery probe limit reached", http.StatusServiceUnavailable)
+		default:
+			http.Error(w, errNoHealthyBackends.Error(), http.StatusServiceUnavailable)
+		}
 		return
 	}
 	defer upstream.backend.Release()
@@ -270,26 +279,27 @@ func (g *Gateway) matchRoute(path string) *route {
 	return matched
 }
 
-func (p *pool) acquire() (*upstream, *breaker.Permit, bool) {
+func (p *pool) acquire() (*upstream, *breaker.Permit, error) {
+	permit, err := p.circuitBreaker.Acquire()
+	if err != nil {
+		return nil, nil, err
+	}
 	backend, ok := p.balancer.Acquire()
 	if !ok {
-		return nil, nil, false
-	}
-	permit, ok := p.circuitBreaker.Acquire()
-	if !ok {
-		backend.Release()
-		return nil, nil, false
+		permit.Cancel()
+		return nil, nil, errNoHealthyBackends
 	}
 	for _, upstream := range p.upstreams {
 		if upstream.backend == backend {
-			return upstream, permit, true
+			return upstream, permit, nil
 		}
 	}
 
 	// A pool is constructed from matching backend and upstream slices, so this
 	// path is unreachable unless that construction invariant is broken.
 	backend.Release()
-	return nil, nil, false
+	permit.Cancel()
+	return nil, nil, errNoHealthyBackends
 }
 
 func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
