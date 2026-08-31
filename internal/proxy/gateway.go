@@ -21,6 +21,7 @@ import (
 	"github.com/codephoenix86/gatex/internal/balancer"
 	"github.com/codephoenix86/gatex/internal/breaker"
 	"github.com/codephoenix86/gatex/internal/config"
+	"github.com/codephoenix86/gatex/internal/middleware"
 	"github.com/codephoenix86/gatex/internal/ratelimiter"
 )
 
@@ -61,6 +62,7 @@ type route struct {
 	pool             *pool
 	limiter          *ratelimiter.ClientLimiter
 	retryAfterHeader string
+	handler          http.Handler
 }
 
 type pool struct {
@@ -167,6 +169,17 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 		}
 		gateway.routes = append(gateway.routes, gatewayRoute)
 	}
+	apiKeyAuth := middleware.APIKeyAuth(cfg.Auth.APIKeys...)
+	for index := range gateway.routes {
+		gatewayRoute := &gateway.routes[index]
+		handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gateway.serveRoute(w, r, gatewayRoute)
+		}))
+		if cfg.Routes[index].Protected {
+			handler = middleware.Chain(apiKeyAuth)(handler)
+		}
+		gatewayRoute.handler = handler
+	}
 
 	return gateway, nil
 }
@@ -223,16 +236,20 @@ func (g *Gateway) CloseIdleConnections() {
 	}
 }
 
-// ServeHTTP matches the most-specific route prefix, attaches a request ID and
-// deadline to the request context, and delegates the backend call to
-// httputil.ReverseProxy.
+// ServeHTTP matches the most-specific route prefix and delegates to its
+// configured middleware and proxy request path.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	matchedRoute := g.matchRoute(r.URL.Path)
 	if matchedRoute == nil {
 		http.Error(w, "no route configured for request path", http.StatusNotFound)
 		return
 	}
+	matchedRoute.handler.ServeHTTP(w, r)
+}
 
+// serveRoute applies request-scoped gateway behavior and delegates the backend
+// call to httputil.ReverseProxy.
+func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRoute *route) {
 	requestID := incomingOrNewRequestID(r.Header.Get(RequestIDHeader))
 	if matchedRoute.limiter != nil && !matchedRoute.limiter.Allow(clientKeyFromRemoteAddr(r.RemoteAddr)) {
 		w.Header().Set(RequestIDHeader, requestID)
@@ -308,6 +325,7 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.Rev
 			originalHost := request.Host
 			rewriteRequestURL(request.URL, target)
 			request.Host = target.Host
+			request.Header.Del(middleware.APIKeyHeader)
 			request.Header.Set(RequestIDHeader, RequestID(request.Context()))
 			request.Header.Set("X-Forwarded-Host", originalHost)
 			if request.TLS != nil {

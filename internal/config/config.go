@@ -22,6 +22,7 @@ type Config struct {
 	ListenAddress string          `yaml:"listen_address"`
 	Timeouts      Timeouts        `yaml:"timeouts"`
 	RateLimit     RateLimit       `yaml:"rate_limit"`
+	Auth          Auth            `yaml:"auth"`
 	BackendPools  map[string]Pool `yaml:"backend_pools"`
 	Routes        []Route         `yaml:"routes"`
 }
@@ -39,6 +40,12 @@ type Timeouts struct {
 type RateLimit struct {
 	RequestsPerSecond float64 `yaml:"requests_per_second"`
 	Burst             int     `yaml:"burst"`
+}
+
+// Auth configures credentials accepted by protected routes. Multiple API keys
+// allow operators to rotate credentials without downtime.
+type Auth struct {
+	APIKeys []string `yaml:"api_keys"`
 }
 
 // Pool groups interchangeable upstreams and selects a balancing strategy.
@@ -71,11 +78,13 @@ type CircuitBreaker struct {
 	HalfOpenMaxRequests int           `yaml:"half_open_max_requests"`
 }
 
-// Route maps a path prefix to one named backend pool.
+// Route maps a path prefix to one named backend pool and optionally requires
+// gateway authentication.
 type Route struct {
 	PathPrefix  string     `yaml:"path_prefix"`
 	BackendPool string     `yaml:"backend_pool"`
 	RateLimit   *RateLimit `yaml:"rate_limit,omitempty"`
+	Protected   bool       `yaml:"protected,omitempty"`
 }
 
 // Load reads, decodes, and validates a YAML configuration file.
@@ -95,7 +104,8 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate rejects ambiguous routes and invalid upstream or limit settings.
+// Validate rejects invalid routing, upstream, rate-limit, and authentication
+// settings.
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.ListenAddress) == "" {
 		return fmt.Errorf("listen_address is required")
@@ -105,6 +115,11 @@ func (c Config) Validate() error {
 	}
 	if err := validateRateLimit("rate_limit", c.RateLimit); err != nil {
 		return err
+	}
+	for index, apiKey := range c.Auth.APIKeys {
+		if !isValidAPIKey(apiKey) {
+			return fmt.Errorf("auth api_keys[%d] must contain only visible ASCII characters", index)
+		}
 	}
 
 	for name, pool := range c.BackendPools {
@@ -147,6 +162,9 @@ func (c Config) Validate() error {
 		if _, ok := c.BackendPools[route.BackendPool]; !ok {
 			return fmt.Errorf("route %q references unknown backend pool %q", route.PathPrefix, route.BackendPool)
 		}
+		if route.Protected && len(c.Auth.APIKeys) == 0 {
+			return fmt.Errorf("protected route %q requires at least one auth.api_keys entry", route.PathPrefix)
+		}
 		if route.RateLimit != nil {
 			if err := validateRateLimit("route rate_limit", *route.RateLimit); err != nil {
 				return err
@@ -154,6 +172,18 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isValidAPIKey(apiKey string) bool {
+	if apiKey == "" {
+		return false
+	}
+	for _, char := range apiKey {
+		if char < 0x21 || char > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHealthCheck(poolName string, check HealthCheck) error {

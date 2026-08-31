@@ -1,2 +1,2 @@
-// Package middleware will contain composable HTTP middleware for Gatex.
+// Package middleware provides composable HTTP middleware for Gatex.
 package middleware

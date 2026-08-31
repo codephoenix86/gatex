@@ -13,6 +13,12 @@ rate_limit:
   requests_per_second: 50
   burst: 100
 
+# Clients send credentials in X-API-Key. Replace this example credential before
+# protecting production routes; multiple keys permit a no-downtime rotation.
+auth:
+  api_keys:
+    - change-me-before-deployment
+
 backend_pools:
   users:
     strategy: round_robin # round_robin or least_connections
@@ -45,3 +51,4 @@ routes:
       burst: 40
   - path_prefix: /api/orders
     backend_pool: orders
+    protected: true

@@ -32,6 +32,13 @@ func TestValidate(t *testing.T) {
 			name: "valid configuration",
 		},
 		{
+			name: "valid protected route",
+			mutate: func(cfg *Config) {
+				cfg.Auth.APIKeys = []string{"current-key", "next-key"}
+				cfg.Routes[0].Protected = true
+			},
+		},
+		{
 			name: "unknown route pool",
 			mutate: func(cfg *Config) {
 				cfg.Routes[0].BackendPool = "missing"
@@ -68,6 +75,27 @@ func TestValidate(t *testing.T) {
 				cfg.Routes[0].RateLimit = &RateLimit{RequestsPerSecond: math.Inf(1), Burst: 1}
 			},
 			wantErr: "must be finite",
+		},
+		{
+			name: "protected route without API keys",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Protected = true
+			},
+			wantErr: "requires at least one auth.api_keys entry",
+		},
+		{
+			name: "empty API key",
+			mutate: func(cfg *Config) {
+				cfg.Auth.APIKeys = []string{""}
+			},
+			wantErr: "visible ASCII",
+		},
+		{
+			name: "API key containing whitespace",
+			mutate: func(cfg *Config) {
+				cfg.Auth.APIKeys = []string{"invalid key"}
+			},
+			wantErr: "visible ASCII",
 		},
 		{
 			name: "relative health check path",

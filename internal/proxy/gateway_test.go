@@ -14,6 +14,7 @@ import (
 
 	"github.com/codephoenix86/gatex/internal/breaker"
 	"github.com/codephoenix86/gatex/internal/config"
+	"github.com/codephoenix86/gatex/internal/middleware"
 )
 
 func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
@@ -344,6 +345,67 @@ func TestGatewayRoutesAndRewritesRequests(t *testing.T) {
 	gateway.ServeHTTP(ordersResponse, httptest.NewRequest(http.MethodGet, "http://gateway.example/api/orders/9", nil))
 	if ordersResponse.Code != http.StatusNoContent {
 		t.Fatalf("orders status = %d, want %d", ordersResponse.Code, http.StatusNoContent)
+	}
+}
+
+func TestGatewayAuthenticatesOnlyProtectedRoutes(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		Auth:          config.Auth{APIKeys: []string{"valid-key"}},
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+			},
+		},
+		Routes: []config.Route{
+			{PathPrefix: "/api", BackendPool: "backend"},
+			{PathPrefix: "/api/admin", BackendPool: "backend", Protected: true},
+		},
+	}, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		if apiKey := request.Header.Get(middleware.APIKeyHeader); apiKey != "" {
+			t.Errorf("upstream received API key %q", apiKey)
+		}
+		return upstreamResponse(request, http.StatusNoContent), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	publicRequest := httptest.NewRequest(http.MethodGet, "http://gateway.example/api/users", nil)
+	publicRequest.Header.Set(middleware.APIKeyHeader, "client-supplied-key")
+	publicResponse := httptest.NewRecorder()
+	gateway.ServeHTTP(publicResponse, publicRequest)
+	if publicResponse.Code != http.StatusNoContent {
+		t.Errorf("public route status = %d, want %d", publicResponse.Code, http.StatusNoContent)
+	}
+
+	for _, apiKey := range []string{"", "invalid-key"} {
+		request := httptest.NewRequest(http.MethodGet, "http://gateway.example/api/admin/users", nil)
+		if apiKey != "" {
+			request.Header.Set(middleware.APIKeyHeader, apiKey)
+		}
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Errorf("protected route with key %q status = %d, want %d", apiKey, response.Code, http.StatusUnauthorized)
+		}
+	}
+
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "http://gateway.example/api/admin/users", nil)
+	authorizedRequest.Header.Set(middleware.APIKeyHeader, "valid-key")
+	authorizedResponse := httptest.NewRecorder()
+	gateway.ServeHTTP(authorizedResponse, authorizedRequest)
+	if authorizedResponse.Code != http.StatusNoContent {
+		t.Errorf("authorized route status = %d, want %d", authorizedResponse.Code, http.StatusNoContent)
+	}
+	if got := upstreamCalls.Load(); got != 2 {
+		t.Errorf("upstream calls = %d, want 2", got)
 	}
 }
 
