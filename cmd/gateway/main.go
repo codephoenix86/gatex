@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/codephoenix86/gatex/internal/config"
+	"github.com/codephoenix86/gatex/internal/middleware"
 	"github.com/codephoenix86/gatex/internal/proxy"
 )
 
@@ -34,8 +36,10 @@ func main() {
 	gateway.StartHealthChecks(healthCheckContext)
 
 	server := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           gateway,
+		Addr: cfg.ListenAddress,
+		Handler: middleware.Chain(
+			middleware.Recovery(slog.Default()),
+		)(gateway),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       cfg.Timeouts.IdleConnection,
 	}
