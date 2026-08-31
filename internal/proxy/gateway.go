@@ -36,6 +36,7 @@ const (
 )
 
 type requestIDContextKey struct{}
+type breakerPermitContextKey struct{}
 
 // RequestID returns the request ID attached by Gateway, if present.
 func RequestID(ctx context.Context) string {
@@ -116,11 +117,11 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 			return nil, fmt.Errorf("create health checker for pool %q: %w", name, err)
 		}
 		balancedBackends := balancingPool.Backends()
-		failureThreshold := configuredPool.CircuitBreaker.FailureThreshold
-		if failureThreshold == 0 {
-			failureThreshold = breaker.DefaultFailureThreshold
-		}
-		circuitBreaker, err := breaker.NewWithFailureThreshold(failureThreshold)
+		circuitBreaker, err := breaker.NewWithConfig(breaker.Config{
+			FailureThreshold:    configuredPool.CircuitBreaker.FailureThreshold,
+			OpenTimeout:         configuredPool.CircuitBreaker.OpenTimeout,
+			HalfOpenMaxRequests: configuredPool.CircuitBreaker.HalfOpenMaxRequests,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("create circuit breaker for pool %q: %w", name, err)
 		}
@@ -139,7 +140,7 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 			backendPool.upstreams = append(backendPool.upstreams, &upstream{
 				backend: balancedBackends[index],
 				target:  target,
-				proxy:   newReverseProxy(target, transport, circuitBreaker),
+				proxy:   newReverseProxy(target, transport),
 			})
 		}
 		gateway.pools[name] = backendPool
@@ -244,13 +245,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	request := r.Clone(ctx)
 	request.Header.Set(RequestIDHeader, requestID)
-	upstream, ok := matchedRoute.pool.acquire()
+	upstream, permit, ok := matchedRoute.pool.acquire()
 	if !ok {
 		w.Header().Set(RequestIDHeader, requestID)
 		http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
 		return
 	}
 	defer upstream.backend.Release()
+	request = request.WithContext(context.WithValue(request.Context(), breakerPermitContextKey{}, permit))
 	upstream.proxy.ServeHTTP(w, request)
 }
 
@@ -268,24 +270,29 @@ func (g *Gateway) matchRoute(path string) *route {
 	return matched
 }
 
-func (p *pool) acquire() (*upstream, bool) {
+func (p *pool) acquire() (*upstream, *breaker.Permit, bool) {
 	backend, ok := p.balancer.Acquire()
 	if !ok {
-		return nil, false
+		return nil, nil, false
+	}
+	permit, ok := p.circuitBreaker.Acquire()
+	if !ok {
+		backend.Release()
+		return nil, nil, false
 	}
 	for _, upstream := range p.upstreams {
 		if upstream.backend == backend {
-			return upstream, true
+			return upstream, permit, true
 		}
 	}
 
 	// A pool is constructed from matching backend and upstream slices, so this
 	// path is unreachable unless that construction invariant is broken.
 	backend.Release()
-	return nil, false
+	return nil, nil, false
 }
 
-func newReverseProxy(target *url.URL, transport http.RoundTripper, circuitBreaker *breaker.Breaker) *httputil.ReverseProxy {
+func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Director: func(request *http.Request) {
 			originalHost := request.Host
@@ -302,16 +309,16 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper, circuitBreake
 		Transport: transport,
 		ModifyResponse: func(response *http.Response) error {
 			if response.StatusCode >= http.StatusInternalServerError && response.StatusCode < 600 {
-				circuitBreaker.RecordFailure()
+				breakerPermit(response.Request.Context()).RecordFailure()
 			} else {
-				circuitBreaker.RecordSuccess()
+				breakerPermit(response.Request.Context()).RecordSuccess()
 			}
 			response.Header.Set(RequestIDHeader, RequestID(response.Request.Context()))
 			response.Header.Set("X-Gateway", "gatex")
 			return nil
 		},
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
-			circuitBreaker.RecordFailure()
+			breakerPermit(request.Context()).RecordFailure()
 			status := http.StatusBadGateway
 			message := "upstream request failed"
 			if errors.Is(request.Context().Err(), context.DeadlineExceeded) {
@@ -323,6 +330,11 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper, circuitBreake
 		},
 	}
 	return proxy
+}
+
+func breakerPermit(ctx context.Context) *breaker.Permit {
+	permit, _ := ctx.Value(breakerPermitContextKey{}).(*breaker.Permit)
+	return permit
 }
 
 func rewriteRequestURL(requestURL, target *url.URL) {

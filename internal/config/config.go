@@ -63,9 +63,12 @@ type HealthCheck struct {
 }
 
 // CircuitBreaker controls when upstream failures stop normal traffic to a
-// backend pool. A zero failure threshold uses the breaker's default.
+// backend pool and how recovery probes are admitted. Zero values use the
+// breaker's defaults.
 type CircuitBreaker struct {
-	FailureThreshold int `yaml:"failure_threshold"`
+	FailureThreshold    int           `yaml:"failure_threshold"`
+	OpenTimeout         time.Duration `yaml:"open_timeout"`
+	HalfOpenMaxRequests int           `yaml:"half_open_max_requests"`
 }
 
 // Route maps a path prefix to one named backend pool.
@@ -125,6 +128,12 @@ func (c Config) Validate() error {
 		}
 		if pool.CircuitBreaker.FailureThreshold < 0 {
 			return fmt.Errorf("backend pool %q circuit_breaker failure_threshold cannot be negative", name)
+		}
+		if pool.CircuitBreaker.OpenTimeout < 0 {
+			return fmt.Errorf("backend pool %q circuit_breaker open_timeout cannot be negative", name)
+		}
+		if pool.CircuitBreaker.HalfOpenMaxRequests < 0 {
+			return fmt.Errorf("backend pool %q circuit_breaker half_open_max_requests cannot be negative", name)
 		}
 	}
 

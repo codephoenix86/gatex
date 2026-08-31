@@ -143,6 +143,82 @@ func TestGatewayRecordsTransportErrorsAsCircuitBreakerFailures(t *testing.T) {
 	}
 }
 
+func TestGatewayLimitsHalfOpenTrafficToConfiguredProbeBatch(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	probeStarted := make(chan struct{}, 2)
+	releaseProbes := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseProbes) })
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return upstreamResponse(request, http.StatusBadGateway), nil
+		}
+		probeStarted <- struct{}{}
+		<-releaseProbes
+		return upstreamResponse(request, http.StatusNoContent), nil
+	})
+	const openTimeout = 10 * time.Millisecond
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal"}},
+				CircuitBreaker: config.CircuitBreaker{
+					FailureThreshold:    1,
+					OpenTimeout:         openTimeout,
+					HalfOpenMaxRequests: 2,
+				},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	tripResponse := serveGatewayRequest(gateway, "/trip", "192.0.2.1:1000")
+	if tripResponse.Code != http.StatusBadGateway {
+		t.Fatalf("trip status = %d, want %d", tripResponse.Code, http.StatusBadGateway)
+	}
+	time.Sleep(2 * openTimeout)
+
+	probeResponses := make(chan *httptest.ResponseRecorder, 2)
+	for probe := range 2 {
+		go func() {
+			probeResponses <- serveGatewayRequest(gateway, fmt.Sprintf("/probe/%d", probe), "192.0.2.1:1000")
+		}()
+	}
+	for probe := range 2 {
+		select {
+		case <-probeStarted:
+		case <-time.After(time.Second):
+			t.Fatalf("probe %d did not reach upstream", probe+1)
+		}
+	}
+
+	blockedResponse := serveGatewayRequest(gateway, "/blocked", "192.0.2.1:1000")
+	if blockedResponse.Code != http.StatusServiceUnavailable {
+		t.Errorf("request beyond probe limit status = %d, want %d", blockedResponse.Code, http.StatusServiceUnavailable)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("upstream calls before probe completion = %d, want 3", got)
+	}
+
+	releaseOnce.Do(func() { close(releaseProbes) })
+	for probe := range 2 {
+		response := <-probeResponses
+		if response.Code != http.StatusNoContent {
+			t.Errorf("probe %d status = %d, want %d", probe+1, response.Code, http.StatusNoContent)
+		}
+	}
+	if got := gateway.pools["backend"].circuitBreaker.State(); got != breaker.StateClosed {
+		t.Errorf("breaker state after successful probes = %s, want %s", got, breaker.StateClosed)
+	}
+}
+
 func TestGatewayRoutesAndRewritesRequests(t *testing.T) {
 	t.Parallel()
 

@@ -96,6 +96,24 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "circuit_breaker failure_threshold cannot be negative",
 		},
+		{
+			name: "negative circuit breaker open timeout",
+			mutate: func(cfg *Config) {
+				pool := cfg.BackendPools["users"]
+				pool.CircuitBreaker.OpenTimeout = -1
+				cfg.BackendPools["users"] = pool
+			},
+			wantErr: "circuit_breaker open_timeout cannot be negative",
+		},
+		{
+			name: "negative circuit breaker half-open max requests",
+			mutate: func(cfg *Config) {
+				pool := cfg.BackendPools["users"]
+				pool.CircuitBreaker.HalfOpenMaxRequests = -1
+				cfg.BackendPools["users"] = pool
+			},
+			wantErr: "circuit_breaker half_open_max_requests cannot be negative",
+		},
 	}
 
 	for _, test := range tests {

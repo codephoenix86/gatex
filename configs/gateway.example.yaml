@@ -22,6 +22,8 @@ backend_pools:
       timeout: 2s
     circuit_breaker:
       failure_threshold: 5
+      open_timeout: 30s
+      half_open_max_requests: 2
     backends:
       - url: http://users-1:8080
       - url: http://users-2:8080
@@ -29,6 +31,8 @@ backend_pools:
     strategy: least_connections
     circuit_breaker:
       failure_threshold: 5
+      open_timeout: 30s
+      half_open_max_requests: 2
     backends:
       - url: http://orders-1:8080
 
