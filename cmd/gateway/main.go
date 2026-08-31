@@ -19,6 +19,9 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	configPath := flag.String("config", "configs/gateway.example.yaml", "path to the gateway YAML configuration")
 	flag.Parse()
 
@@ -38,7 +41,16 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.ListenAddress,
 		Handler: middleware.Chain(
-			middleware.Recovery(slog.Default()),
+			middleware.Recovery(logger),
+			middleware.RequestLogger(logger),
+			middleware.CORS(middleware.CORSOptions{
+				AllowedOrigins:   cfg.CORS.AllowedOrigins,
+				AllowedMethods:   cfg.CORS.AllowedMethods,
+				AllowedHeaders:   cfg.CORS.AllowedHeaders,
+				ExposedHeaders:   cfg.CORS.ExposedHeaders,
+				AllowCredentials: cfg.CORS.AllowCredentials,
+				MaxAge:           cfg.CORS.MaxAge,
+			}),
 		)(gateway),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       cfg.Timeouts.IdleConnection,

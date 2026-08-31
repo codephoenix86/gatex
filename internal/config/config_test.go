@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validConfig() Config {
@@ -17,6 +18,14 @@ func validConfig() Config {
 			},
 		},
 		Routes: []Route{{PathPrefix: "/users", BackendPool: "users"}},
+	}
+}
+
+func TestExampleConfigurationLoads(t *testing.T) {
+	t.Parallel()
+
+	if _, err := Load("../../configs/gateway.example.yaml"); err != nil {
+		t.Fatalf("Load(example configuration) error = %v", err)
 	}
 }
 
@@ -36,6 +45,18 @@ func TestValidate(t *testing.T) {
 			mutate: func(cfg *Config) {
 				cfg.Auth.APIKeys = []string{"current-key", "next-key"}
 				cfg.Routes[0].Protected = true
+			},
+		},
+		{
+			name: "valid CORS configuration",
+			mutate: func(cfg *Config) {
+				cfg.CORS = CORS{
+					AllowedOrigins: []string{"https://app.example.com"},
+					AllowedMethods: []string{"GET", "POST"},
+					AllowedHeaders: []string{"Content-Type", "X-API-Key"},
+					ExposedHeaders: []string{"X-Request-ID"},
+					MaxAge:         10 * time.Minute,
+				}
 			},
 		},
 		{
@@ -96,6 +117,69 @@ func TestValidate(t *testing.T) {
 				cfg.Auth.APIKeys = []string{"invalid key"}
 			},
 			wantErr: "visible ASCII",
+		},
+		{
+			name: "CORS options without origins",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedMethods = []string{"GET"}
+			},
+			wantErr: "allowed_origins is required",
+		},
+		{
+			name: "CORS configuration without methods",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"https://app.example.com"}
+			},
+			wantErr: "allowed_methods must contain",
+		},
+		{
+			name: "invalid CORS origin",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"app.example.com"}
+				cfg.CORS.AllowedMethods = []string{"GET"}
+			},
+			wantErr: "invalid origin",
+		},
+		{
+			name: "credentialed wildcard CORS origin",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"*"}
+				cfg.CORS.AllowedMethods = []string{"GET"}
+				cfg.CORS.AllowCredentials = true
+			},
+			wantErr: "allow_credentials cannot be used with wildcard",
+		},
+		{
+			name: "lowercase CORS method",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"*"}
+				cfg.CORS.AllowedMethods = []string{"get"}
+			},
+			wantErr: "invalid method",
+		},
+		{
+			name: "wildcard CORS method",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"*"}
+				cfg.CORS.AllowedMethods = []string{"*"}
+			},
+			wantErr: "invalid method",
+		},
+		{
+			name: "invalid CORS header",
+			mutate: func(cfg *Config) {
+				cfg.CORS.AllowedOrigins = []string{"*"}
+				cfg.CORS.AllowedMethods = []string{"GET"}
+				cfg.CORS.AllowedHeaders = []string{"invalid header"}
+			},
+			wantErr: "invalid header",
+		},
+		{
+			name: "negative CORS max age",
+			mutate: func(cfg *Config) {
+				cfg.CORS.MaxAge = -time.Second
+			},
+			wantErr: "max_age cannot be negative",
 		},
 		{
 			name: "relative health check path",

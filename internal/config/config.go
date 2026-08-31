@@ -23,6 +23,7 @@ type Config struct {
 	Timeouts      Timeouts        `yaml:"timeouts"`
 	RateLimit     RateLimit       `yaml:"rate_limit"`
 	Auth          Auth            `yaml:"auth"`
+	CORS          CORS            `yaml:"cors"`
 	BackendPools  map[string]Pool `yaml:"backend_pools"`
 	Routes        []Route         `yaml:"routes"`
 }
@@ -46,6 +47,17 @@ type RateLimit struct {
 // allow operators to rotate credentials without downtime.
 type Auth struct {
 	APIKeys []string `yaml:"api_keys"`
+}
+
+// CORS controls which browser origins may call the gateway. An empty
+// AllowedOrigins list disables CORS handling.
+type CORS struct {
+	AllowedOrigins   []string      `yaml:"allowed_origins"`
+	AllowedMethods   []string      `yaml:"allowed_methods"`
+	AllowedHeaders   []string      `yaml:"allowed_headers"`
+	ExposedHeaders   []string      `yaml:"exposed_headers"`
+	AllowCredentials bool          `yaml:"allow_credentials"`
+	MaxAge           time.Duration `yaml:"max_age"`
 }
 
 // Pool groups interchangeable upstreams and selects a balancing strategy.
@@ -121,6 +133,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("auth api_keys[%d] must contain only visible ASCII characters", index)
 		}
 	}
+	if err := validateCORS(c.CORS); err != nil {
+		return err
+	}
 
 	for name, pool := range c.BackendPools {
 		if strings.TrimSpace(name) == "" {
@@ -180,6 +195,70 @@ func isValidAPIKey(apiKey string) bool {
 	}
 	for _, char := range apiKey {
 		if char < 0x21 || char > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCORS(cors CORS) error {
+	if cors.MaxAge < 0 {
+		return fmt.Errorf("cors max_age cannot be negative")
+	}
+	if len(cors.AllowedOrigins) == 0 {
+		if len(cors.AllowedMethods) > 0 || len(cors.AllowedHeaders) > 0 || len(cors.ExposedHeaders) > 0 || cors.AllowCredentials || cors.MaxAge > 0 {
+			return fmt.Errorf("cors allowed_origins is required when CORS options are configured")
+		}
+		return nil
+	}
+	if len(cors.AllowedMethods) == 0 {
+		return fmt.Errorf("cors allowed_methods must contain at least one method")
+	}
+
+	allowsEveryOrigin := false
+	for index, origin := range cors.AllowedOrigins {
+		if origin == "*" {
+			allowsEveryOrigin = true
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("cors allowed_origins[%d] has invalid origin %q", index, origin)
+		}
+	}
+	if allowsEveryOrigin && cors.AllowCredentials {
+		return fmt.Errorf("cors allow_credentials cannot be used with wildcard origin")
+	}
+	for index, method := range cors.AllowedMethods {
+		if method == "*" || !isHTTPToken(method) || method != strings.ToUpper(method) {
+			return fmt.Errorf("cors allowed_methods[%d] has invalid method %q", index, method)
+		}
+	}
+	for index, header := range cors.AllowedHeaders {
+		if !isHTTPToken(header) {
+			return fmt.Errorf("cors allowed_headers[%d] has invalid header %q", index, header)
+		}
+	}
+	for index, header := range cors.ExposedHeaders {
+		if !isHTTPToken(header) {
+			return fmt.Errorf("cors exposed_headers[%d] has invalid header %q", index, header)
+		}
+	}
+	return nil
+}
+
+func isHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
 			return false
 		}
 	}

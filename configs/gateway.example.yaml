@@ -19,6 +19,24 @@ auth:
   api_keys:
     - change-me-before-deployment
 
+cors:
+  allowed_origins:
+    - https://app.example.com
+  allowed_methods:
+    - GET
+    - POST
+    - PUT
+    - PATCH
+    - DELETE
+  allowed_headers:
+    - Content-Type
+    - X-API-Key
+    - X-Request-ID
+  exposed_headers:
+    - X-Request-ID
+  allow_credentials: false
+  max_age: 10m
+
 backend_pools:
   users:
     strategy: round_robin # round_robin or least_connections
