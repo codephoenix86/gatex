@@ -43,6 +43,13 @@ type RateLimit struct {
 	Burst             int     `yaml:"burst"`
 }
 
+// Cache configures a bounded response cache for one route. A route without a
+// Cache value does not cache responses.
+type Cache struct {
+	TTL        time.Duration `yaml:"ttl"`
+	MaxEntries int           `yaml:"max_entries"`
+}
+
 // Auth configures credentials accepted by protected routes. Multiple API keys
 // allow operators to rotate credentials without downtime.
 type Auth struct {
@@ -90,12 +97,13 @@ type CircuitBreaker struct {
 	HalfOpenMaxRequests int           `yaml:"half_open_max_requests"`
 }
 
-// Route maps a path prefix to one named backend pool and optionally requires
-// gateway authentication.
+// Route maps a path prefix to one named backend pool and optionally applies
+// gateway authentication, rate limiting, and response caching.
 type Route struct {
 	PathPrefix  string     `yaml:"path_prefix"`
 	BackendPool string     `yaml:"backend_pool"`
 	RateLimit   *RateLimit `yaml:"rate_limit,omitempty"`
+	Cache       *Cache     `yaml:"cache,omitempty"`
 	Protected   bool       `yaml:"protected,omitempty"`
 }
 
@@ -116,8 +124,8 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate rejects invalid routing, upstream, rate-limit, and authentication
-// settings.
+// Validate rejects invalid routing, upstream, rate-limit, cache,
+// authentication, and CORS settings.
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.ListenAddress) == "" {
 		return fmt.Errorf("listen_address is required")
@@ -182,6 +190,11 @@ func (c Config) Validate() error {
 		}
 		if route.RateLimit != nil {
 			if err := validateRateLimit("route rate_limit", *route.RateLimit); err != nil {
+				return err
+			}
+		}
+		if route.Cache != nil {
+			if err := validateCache(route.PathPrefix, *route.Cache); err != nil {
 				return err
 			}
 		}
@@ -290,6 +303,16 @@ func validateRateLimit(name string, limit RateLimit) error {
 	}
 	if (limit.RequestsPerSecond == 0) != (limit.Burst == 0) {
 		return fmt.Errorf("%s requests_per_second and burst must both be set or both be zero", name)
+	}
+	return nil
+}
+
+func validateCache(routePath string, cache Cache) error {
+	if cache.TTL <= 0 {
+		return fmt.Errorf("route %q cache ttl must be positive", routePath)
+	}
+	if cache.MaxEntries <= 0 {
+		return fmt.Errorf("route %q cache max_entries must be positive", routePath)
 	}
 	return nil
 }

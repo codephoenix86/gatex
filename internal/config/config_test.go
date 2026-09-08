@@ -24,8 +24,20 @@ func validConfig() Config {
 func TestExampleConfigurationLoads(t *testing.T) {
 	t.Parallel()
 
-	if _, err := Load("../../configs/gateway.example.yaml"); err != nil {
+	cfg, err := Load("../../configs/gateway.example.yaml")
+	if err != nil {
 		t.Fatalf("Load(example configuration) error = %v", err)
+	}
+
+	usersCache := cfg.Routes[0].Cache
+	if usersCache == nil {
+		t.Fatal("users route cache configuration is nil")
+	}
+	if usersCache.TTL != 30*time.Second {
+		t.Errorf("users route cache TTL = %s, want %s", usersCache.TTL, 30*time.Second)
+	}
+	if usersCache.MaxEntries != 1_000 {
+		t.Errorf("users route cache max entries = %d, want %d", usersCache.MaxEntries, 1_000)
 	}
 }
 
@@ -57,6 +69,12 @@ func TestValidate(t *testing.T) {
 					ExposedHeaders: []string{"X-Request-ID"},
 					MaxAge:         10 * time.Minute,
 				}
+			},
+		},
+		{
+			name: "valid route cache",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Cache = &Cache{TTL: time.Minute, MaxEntries: 100}
 			},
 		},
 		{
@@ -96,6 +114,34 @@ func TestValidate(t *testing.T) {
 				cfg.Routes[0].RateLimit = &RateLimit{RequestsPerSecond: math.Inf(1), Burst: 1}
 			},
 			wantErr: "must be finite",
+		},
+		{
+			name: "route cache without TTL",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Cache = &Cache{MaxEntries: 100}
+			},
+			wantErr: "cache ttl must be positive",
+		},
+		{
+			name: "route cache with negative TTL",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Cache = &Cache{TTL: -time.Second, MaxEntries: 100}
+			},
+			wantErr: "cache ttl must be positive",
+		},
+		{
+			name: "route cache without maximum entries",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Cache = &Cache{TTL: time.Minute}
+			},
+			wantErr: "cache max_entries must be positive",
+		},
+		{
+			name: "route cache with negative maximum entries",
+			mutate: func(cfg *Config) {
+				cfg.Routes[0].Cache = &Cache{TTL: time.Minute, MaxEntries: -1}
+			},
+			wantErr: "cache max_entries must be positive",
 		},
 		{
 			name: "protected route without API keys",

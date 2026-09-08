@@ -63,6 +63,10 @@ backend_pools:
 routes:
   - path_prefix: /api/users
     backend_pool: users
+    # Caching is opt-in per route and will apply only to eligible GET responses.
+    cache:
+      ttl: 30s
+      max_entries: 1000
     # A route can override the global rate limit.
     rate_limit:
       requests_per_second: 20
