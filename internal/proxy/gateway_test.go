@@ -357,6 +357,7 @@ func TestGatewayCachesEligibleGETResponses(t *testing.T) {
 		response := upstreamResponseWithBody(request, http.StatusOK, fmt.Sprintf("upstream response %d", call))
 		response.Header.Set("Content-Type", "text/plain")
 		response.Header.Set("ETag", `"version-1"`)
+		response.Header.Set(CacheStatusHeader, "UPSTREAM")
 		return response, nil
 	}))
 
@@ -387,8 +388,120 @@ func TestGatewayCachesEligibleGETResponses(t *testing.T) {
 	if got := firstResponse.Header().Get(RequestIDHeader); got != "first-request" {
 		t.Errorf("first response request ID = %q, want %q", got, "first-request")
 	}
+	if got := firstResponse.Header().Get(CacheStatusHeader); got != cacheMiss {
+		t.Errorf("first response cache status = %q, want %q", got, cacheMiss)
+	}
 	if got := secondResponse.Header().Get(RequestIDHeader); got != "second-request" {
 		t.Errorf("cached response request ID = %q, want %q", got, "second-request")
+	}
+	if got := secondResponse.Header().Get(CacheStatusHeader); got != cacheHit {
+		t.Errorf("cached response cache status = %q, want %q", got, cacheHit)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1", got)
+	}
+}
+
+func TestGatewayAuthenticatesAndRateLimitsBeforeCacheLookup(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		Auth:          config.Auth{APIKeys: []string{"valid-key"}},
+		RateLimit: config.RateLimit{
+			RequestsPerSecond: 0.0001,
+			Burst:             1,
+		},
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{{
+			PathPrefix:  "/protected",
+			BackendPool: "backend",
+			Protected:   true,
+			Cache:       &config.Cache{TTL: time.Minute, MaxEntries: 10},
+		}},
+	}, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		return upstreamResponseWithBody(request, http.StatusOK, "shared response"), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+
+	unauthorized := serveAuthenticatedGatewayRequest(gateway, "/protected/resource", "192.0.2.1:1000", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Errorf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+	if got := unauthorized.Header().Get(CacheStatusHeader); got != "" {
+		t.Errorf("unauthorized cache status = %q, want empty", got)
+	}
+
+	miss := serveAuthenticatedGatewayRequest(gateway, "/protected/resource", "192.0.2.1:1000", "valid-key")
+	if miss.Code != http.StatusOK || miss.Header().Get(CacheStatusHeader) != cacheMiss {
+		t.Errorf("first authorized response = status %d cache %q, want status %d cache %q", miss.Code, miss.Header().Get(CacheStatusHeader), http.StatusOK, cacheMiss)
+	}
+
+	limited := serveAuthenticatedGatewayRequest(gateway, "/protected/resource", "192.0.2.1:2000", "valid-key")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Errorf("rate-limited status = %d, want %d", limited.Code, http.StatusTooManyRequests)
+	}
+	if got := limited.Header().Get(CacheStatusHeader); got != "" {
+		t.Errorf("rate-limited cache status = %q, want empty", got)
+	}
+
+	hit := serveAuthenticatedGatewayRequest(gateway, "/protected/resource", "192.0.2.2:1000", "valid-key")
+	if hit.Code != http.StatusOK || hit.Header().Get(CacheStatusHeader) != cacheHit {
+		t.Errorf("second client response = status %d cache %q, want status %d cache %q", hit.Code, hit.Header().Get(CacheStatusHeader), http.StatusOK, cacheHit)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1", got)
+	}
+}
+
+func TestGatewayServesConcurrentCacheHits(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway := mustCachingGateway(t, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		return upstreamResponseWithBody(request, http.StatusOK, "cached response"), nil
+	}))
+	prewarm := httptest.NewRecorder()
+	gateway.ServeHTTP(prewarm, httptest.NewRequest(http.MethodGet, "http://gateway.example/resources", nil))
+	if prewarm.Code != http.StatusOK || prewarm.Header().Get(CacheStatusHeader) != cacheMiss {
+		t.Fatalf("prewarm response = status %d cache %q, want status %d cache %q", prewarm.Code, prewarm.Header().Get(CacheStatusHeader), http.StatusOK, cacheMiss)
+	}
+
+	const workers = 200
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	var failedResponses atomic.Int64
+	group.Add(workers)
+	for worker := range workers {
+		go func() {
+			defer group.Done()
+			<-start
+
+			requestID := fmt.Sprintf("cached-request-%d", worker)
+			request := httptest.NewRequest(http.MethodGet, "http://gateway.example/resources", nil)
+			request.Header.Set(RequestIDHeader, requestID)
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, request)
+			if response.Code != http.StatusOK ||
+				response.Body.String() != "cached response" ||
+				response.Header().Get(CacheStatusHeader) != cacheHit ||
+				response.Header().Get(RequestIDHeader) != requestID {
+				failedResponses.Add(1)
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+
+	if got := failedResponses.Load(); got != 0 {
+		t.Errorf("failed cached responses = %d, want 0", got)
 	}
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Errorf("upstream calls = %d, want 1", got)
@@ -457,7 +570,7 @@ func TestGatewayBypassesUncacheableRequests(t *testing.T) {
 				return upstreamResponseWithBody(request, http.StatusOK, fmt.Sprintf("response-%d", call)), nil
 			}))
 
-			for range 2 {
+			for requestNumber := range 2 {
 				var body io.Reader
 				if test.body != "" {
 					body = strings.NewReader(test.body)
@@ -466,7 +579,11 @@ func TestGatewayBypassesUncacheableRequests(t *testing.T) {
 				if test.header != nil {
 					request.Header = test.header.Clone()
 				}
-				gateway.ServeHTTP(httptest.NewRecorder(), request)
+				response := httptest.NewRecorder()
+				gateway.ServeHTTP(response, request)
+				if got := response.Header().Get(CacheStatusHeader); got != "" {
+					t.Errorf("request %d cache status = %q, want empty", requestNumber+1, got)
+				}
 			}
 			if got := upstreamCalls.Load(); got != 2 {
 				t.Errorf("upstream calls = %d, want 2", got)
@@ -512,8 +629,12 @@ func TestGatewayDoesNotStoreUncacheableResponses(t *testing.T) {
 				return response, nil
 			}))
 
-			for range 2 {
-				gateway.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://gateway.example/resources", nil))
+			for requestNumber := range 2 {
+				response := httptest.NewRecorder()
+				gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.example/resources", nil))
+				if got := response.Header().Get(CacheStatusHeader); got != cacheMiss {
+					t.Errorf("request %d cache status = %q, want %q", requestNumber+1, got, cacheMiss)
+				}
 			}
 			if got := upstreamCalls.Load(); got != 2 {
 				t.Errorf("upstream calls = %d, want 2", got)

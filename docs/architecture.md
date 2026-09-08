@@ -34,6 +34,10 @@ API-key auth (protected routes only)
 per-client rate limit
   |
   v
+route response cache + request ID ----------> HIT -> client
+  |
+  | MISS
+  v
 request deadline + request ID
   |
   v
@@ -72,12 +76,49 @@ they produce this order:
 6. **Rate limiting** rejects excess authenticated or public-route traffic
    before a circuit-breaker permit, backend slot, or upstream connection is
    acquired.
-7. **Proxy handling** adds the request deadline and request ID, checks the pool
+7. **Response caching** runs only on explicitly configured routes and after
+   authentication and rate limiting. This prevents unauthorized access to a
+   cached response and ensures cache hits consume the same client quota as
+   misses. A hit avoids the circuit breaker, load balancer, and upstream call.
+   The cache layer assigns the current request ID to a hit and passes that same
+   ID into proxy handling on a miss.
+8. **Proxy handling** adds the request deadline and request ID, checks the pool
    circuit breaker, selects a healthy backend, and performs the upstream call.
 
 Responses unwind through the same handlers in reverse order. In particular,
 the access logger observes the final status and latency after the inner request
 path completes.
+
+## Response cache
+
+Caching is disabled unless a route supplies both `cache.ttl` and
+`cache.max_entries`. Each configured route owns an independent, concurrency-safe
+LRU cache, so entries cannot collide across routes and one route cannot evict
+another route's responses. Entries expire lazily after the configured TTL. The
+entry limit bounds the number of stored responses, while a fixed 1 MiB body
+limit prevents one response from consuming unbounded temporary or cache memory.
+
+Only bodyless `GET` requests are candidates. The key contains the incoming
+scheme, host, escaped path, and raw query. Requests carrying authorization,
+cookies, range or conditional headers, upgrade requests, and client no-cache
+directives bypass the cache. Gatex stores only complete `200 OK` responses and
+does not store responses with `no-cache`, `no-store`, `private`, zero freshness,
+`Set-Cookie`, `Vary`, content ranges, content encoding, trailers, or an oversized
+body. These conservative rules avoid replaying personalized, partial, encoded,
+or otherwise variant content without implementing a full RFC-compliant shared
+HTTP cache.
+
+Eligible lookups return `X-Cache: MISS` when the request reaches the proxy and
+`X-Cache: HIT` when Gatex replays a stored response. Bypassed requests and
+routes without caching omit the header. Request IDs are never stored; every
+cache hit returns the current request's ID.
+
+Invalidation is TTL- and eviction-based: there is no active purge endpoint in
+the initial scope, and restarting Gatex clears every entry. Each gateway
+instance has its own cache, so instances can temporarily hold different values.
+A multi-instance deployment that needs coordinated invalidation should use a
+shared store such as Redis or an invalidation channel; Gatex intentionally
+implements neither in this phase.
 
 ## Deliberate library choices
 
@@ -96,6 +137,7 @@ path completes.
 | --- | --- |
 | `cmd/gateway` | Process startup and configuration loading. |
 | `internal/config` | YAML schema, defaults, and validation. |
+| `internal/cache` | Bounded, concurrency-safe TTL/LRU response storage. |
 | `internal/proxy` | Reverse-proxy handler and outbound transport. |
 | `internal/balancer` | Backend selection and health tracking. |
 | `internal/ratelimiter` | Per-client request limiting. |

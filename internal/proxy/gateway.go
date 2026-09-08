@@ -368,6 +368,7 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.Rev
 			} else {
 				breakerPermit(response.Request.Context()).RecordSuccess()
 			}
+			response.Header.Del(CacheStatusHeader)
 			response.Header.Set(RequestIDHeader, RequestID(response.Request.Context()))
 			response.Header.Set("X-Gateway", "gatex")
 			return nil

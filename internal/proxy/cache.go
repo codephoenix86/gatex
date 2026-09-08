@@ -8,9 +8,18 @@ import (
 	"github.com/codephoenix86/gatex/internal/middleware"
 )
 
-// The fixed body limit bounds temporary memory use independently of the
-// configured number of cache entries.
-const maxCacheableResponseBytes = 1 << 20
+const (
+	// CacheStatusHeader reports the route-cache lookup outcome for an eligible
+	// request.
+	CacheStatusHeader = "X-Cache"
+
+	cacheHit  = "HIT"
+	cacheMiss = "MISS"
+
+	// The fixed body limit bounds memory use per response independently of the
+	// configured number of entries.
+	maxCacheableResponseBytes = 1 << 20
+)
 
 func (r *route) cacheResponses() middleware.Middleware {
 	return func(next http.Handler) http.Handler {
@@ -29,10 +38,12 @@ func (r *route) cacheResponses() middleware.Middleware {
 				return
 			}
 
+			w.Header().Set(CacheStatusHeader, cacheMiss)
 			capture := &cacheResponseWriter{ResponseWriter: w}
 			next.ServeHTTP(capture, requestWithID)
 			if response, ok := capture.response(); ok {
 				response.Header.Del(RequestIDHeader)
+				response.Header.Del(CacheStatusHeader)
 				r.responseCache.Set(key, response)
 			}
 		})
@@ -178,6 +189,7 @@ func writeCachedResponse(writer http.ResponseWriter, response responsecache.Resp
 		writer.Header()[name] = append([]string(nil), values...)
 	}
 	writer.Header().Set(RequestIDHeader, requestID)
+	writer.Header().Set(CacheStatusHeader, cacheHit)
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(response.Body)
 }

@@ -1,2 +1,3 @@
-// Package proxy will contain Gatex's ReverseProxy handler and outbound transport.
+// Package proxy implements Gatex's reverse-proxy request path, outbound
+// transport, and route response caching.
 package proxy

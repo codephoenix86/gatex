@@ -34,6 +34,7 @@ cors:
     - X-Request-ID
   exposed_headers:
     - X-Request-ID
+    - X-Cache
   allow_credentials: false
   max_age: 10m
 
@@ -63,7 +64,8 @@ backend_pools:
 routes:
   - path_prefix: /api/users
     backend_pool: users
-    # Caching is opt-in per route and will apply only to eligible GET responses.
+    # Caching is opt-in per route and applies only to eligible GET responses.
+    # Response bodies larger than 1 MiB are passed through without being stored.
     cache:
       ttl: 30s
       max_entries: 1000
