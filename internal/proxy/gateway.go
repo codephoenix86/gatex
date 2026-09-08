@@ -20,6 +20,7 @@ import (
 
 	"github.com/codephoenix86/gatex/internal/balancer"
 	"github.com/codephoenix86/gatex/internal/breaker"
+	responsecache "github.com/codephoenix86/gatex/internal/cache"
 	"github.com/codephoenix86/gatex/internal/config"
 	"github.com/codephoenix86/gatex/internal/middleware"
 	"github.com/codephoenix86/gatex/internal/ratelimiter"
@@ -61,6 +62,7 @@ type route struct {
 	pathPrefix       string
 	pool             *pool
 	limiter          *ratelimiter.ClientLimiter
+	responseCache    *responsecache.Cache
 	retryAfterHeader string
 	handler          http.Handler
 }
@@ -167,17 +169,27 @@ func NewGatewayWithTransport(cfg config.Config, transport http.RoundTripper) (*G
 			gatewayRoute.limiter = limiter
 			gatewayRoute.retryAfterHeader = retryAfterValue(limit.RequestsPerSecond)
 		}
+		if configuredRoute.Cache != nil {
+			cache, err := responsecache.New(configuredRoute.Cache.TTL, configuredRoute.Cache.MaxEntries)
+			if err != nil {
+				return nil, fmt.Errorf("create response cache for route %q: %w", configuredRoute.PathPrefix, err)
+			}
+			gatewayRoute.responseCache = cache
+		}
 		gateway.routes = append(gateway.routes, gatewayRoute)
 	}
 	apiKeyAuth := middleware.APIKeyAuth(cfg.Auth.APIKeys...)
 	for index := range gateway.routes {
 		gatewayRoute := &gateway.routes[index]
-		routeMiddleware := make([]middleware.Middleware, 0, 2)
+		routeMiddleware := make([]middleware.Middleware, 0, 3)
 		if cfg.Routes[index].Protected {
 			routeMiddleware = append(routeMiddleware, apiKeyAuth)
 		}
 		if gatewayRoute.limiter != nil {
 			routeMiddleware = append(routeMiddleware, gatewayRoute.rateLimit())
+		}
+		if gatewayRoute.responseCache != nil {
+			routeMiddleware = append(routeMiddleware, gatewayRoute.cacheResponses())
 		}
 		handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gateway.serveRoute(w, r, gatewayRoute)

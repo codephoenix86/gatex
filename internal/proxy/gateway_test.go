@@ -348,6 +348,180 @@ func TestGatewayRoutesAndRewritesRequests(t *testing.T) {
 	}
 }
 
+func TestGatewayCachesEligibleGETResponses(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway := mustCachingGateway(t, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		call := upstreamCalls.Add(1)
+		response := upstreamResponseWithBody(request, http.StatusOK, fmt.Sprintf("upstream response %d", call))
+		response.Header.Set("Content-Type", "text/plain")
+		response.Header.Set("ETag", `"version-1"`)
+		return response, nil
+	}))
+
+	firstRequest := httptest.NewRequest(http.MethodGet, "http://gateway.example/resources/42?view=full", nil)
+	firstRequest.Header.Set(RequestIDHeader, "first-request")
+	firstResponse := httptest.NewRecorder()
+	gateway.ServeHTTP(firstResponse, firstRequest)
+
+	secondRequest := httptest.NewRequest(http.MethodGet, "http://gateway.example/resources/42?view=full", nil)
+	secondRequest.Header.Set(RequestIDHeader, "second-request")
+	secondResponse := httptest.NewRecorder()
+	gateway.ServeHTTP(secondResponse, secondRequest)
+
+	for number, response := range []*httptest.ResponseRecorder{firstResponse, secondResponse} {
+		if response.Code != http.StatusOK {
+			t.Errorf("response %d status = %d, want %d", number+1, response.Code, http.StatusOK)
+		}
+		if got := response.Body.String(); got != "upstream response 1" {
+			t.Errorf("response %d body = %q, want %q", number+1, got, "upstream response 1")
+		}
+		if got := response.Header().Get("Content-Type"); got != "text/plain" {
+			t.Errorf("response %d Content-Type = %q, want %q", number+1, got, "text/plain")
+		}
+		if got := response.Header().Get("ETag"); got != `"version-1"` {
+			t.Errorf("response %d ETag = %q, want %q", number+1, got, `"version-1"`)
+		}
+	}
+	if got := firstResponse.Header().Get(RequestIDHeader); got != "first-request" {
+		t.Errorf("first response request ID = %q, want %q", got, "first-request")
+	}
+	if got := secondResponse.Header().Get(RequestIDHeader); got != "second-request" {
+		t.Errorf("cached response request ID = %q, want %q", got, "second-request")
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1", got)
+	}
+}
+
+func TestGatewayCacheKeySeparatesQueryHostAndScheme(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	gateway := mustCachingGateway(t, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		call := upstreamCalls.Add(1)
+		return upstreamResponseWithBody(request, http.StatusOK, fmt.Sprintf("response-%d", call)), nil
+	}))
+
+	tests := []struct {
+		url      string
+		wantBody string
+	}{
+		{url: "http://gateway.example/resources?view=summary", wantBody: "response-1"},
+		{url: "http://gateway.example/resources?view=summary", wantBody: "response-1"},
+		{url: "http://gateway.example/resources?view=full", wantBody: "response-2"},
+		{url: "http://other.example/resources?view=summary", wantBody: "response-3"},
+		{url: "https://gateway.example/resources?view=summary", wantBody: "response-4"},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.url, nil))
+		if got := response.Body.String(); got != test.wantBody {
+			t.Errorf("GET %s body = %q, want %q", test.url, got, test.wantBody)
+		}
+	}
+	if got := upstreamCalls.Load(); got != 4 {
+		t.Errorf("upstream calls = %d, want 4", got)
+	}
+}
+
+func TestGatewayBypassesUncacheableRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		header http.Header
+	}{
+		{name: "non-GET method", method: http.MethodPost},
+		{name: "GET body", method: http.MethodGet, body: "request body"},
+		{name: "authorization", method: http.MethodGet, header: http.Header{"Authorization": {"Bearer credential"}}},
+		{name: "cookie", method: http.MethodGet, header: http.Header{"Cookie": {"session=credential"}}},
+		{name: "conditional", method: http.MethodGet, header: http.Header{"If-None-Match": {`"version-1"`}}},
+		{name: "range", method: http.MethodGet, header: http.Header{"Range": {"bytes=0-99"}}},
+		{name: "upgrade", method: http.MethodGet, header: http.Header{"Upgrade": {"websocket"}}},
+		{name: "cache-control no-cache", method: http.MethodGet, header: http.Header{"Cache-Control": {"no-cache"}}},
+		{name: "cache-control no-store", method: http.MethodGet, header: http.Header{"Cache-Control": {"no-store"}}},
+		{name: "cache-control zero max-age", method: http.MethodGet, header: http.Header{"Cache-Control": {`max-age="0"`}}},
+		{name: "pragma no-cache", method: http.MethodGet, header: http.Header{"Pragma": {"no-cache"}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var upstreamCalls atomic.Int64
+			gateway := mustCachingGateway(t, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				call := upstreamCalls.Add(1)
+				return upstreamResponseWithBody(request, http.StatusOK, fmt.Sprintf("response-%d", call)), nil
+			}))
+
+			for range 2 {
+				var body io.Reader
+				if test.body != "" {
+					body = strings.NewReader(test.body)
+				}
+				request := httptest.NewRequest(test.method, "http://gateway.example/resources", body)
+				if test.header != nil {
+					request.Header = test.header.Clone()
+				}
+				gateway.ServeHTTP(httptest.NewRecorder(), request)
+			}
+			if got := upstreamCalls.Load(); got != 2 {
+				t.Errorf("upstream calls = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestGatewayDoesNotStoreUncacheableResponses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		header  http.Header
+		trailer http.Header
+	}{
+		{name: "non-OK status", status: http.StatusAccepted, body: "accepted"},
+		{name: "cache-control no-cache", status: http.StatusOK, body: "body", header: http.Header{"Cache-Control": {"no-cache"}}},
+		{name: "cache-control no-store", status: http.StatusOK, body: "body", header: http.Header{"Cache-Control": {"no-store"}}},
+		{name: "cache-control private", status: http.StatusOK, body: "body", header: http.Header{"Cache-Control": {"private"}}},
+		{name: "cache-control zero shared max-age", status: http.StatusOK, body: "body", header: http.Header{"Cache-Control": {"s-maxage=0"}}},
+		{name: "set-cookie", status: http.StatusOK, body: "body", header: http.Header{"Set-Cookie": {"session=credential"}}},
+		{name: "vary", status: http.StatusOK, body: "body", header: http.Header{"Vary": {"Accept-Language"}}},
+		{name: "content-range", status: http.StatusOK, body: "body", header: http.Header{"Content-Range": {"bytes 0-3/10"}}},
+		{name: "content-encoding", status: http.StatusOK, body: "body", header: http.Header{"Content-Encoding": {"gzip"}}},
+		{name: "trailer", status: http.StatusOK, body: "body", trailer: http.Header{"X-Checksum": nil}},
+		{name: "oversized", status: http.StatusOK, body: strings.Repeat("x", maxCacheableResponseBytes+1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var upstreamCalls atomic.Int64
+			gateway := mustCachingGateway(t, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				upstreamCalls.Add(1)
+				response := upstreamResponseWithBody(request, test.status, test.body)
+				if test.header != nil {
+					response.Header = test.header.Clone()
+				}
+				response.Trailer = test.trailer.Clone()
+				return response, nil
+			}))
+
+			for range 2 {
+				gateway.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://gateway.example/resources", nil))
+			}
+			if got := upstreamCalls.Load(); got != 2 {
+				t.Errorf("upstream calls = %d, want 2", got)
+			}
+		})
+	}
+}
+
 func TestGatewayAuthenticatesOnlyProtectedRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -1007,6 +1181,25 @@ func rateLimitedConfig(limit config.RateLimit) config.Config {
 	}
 }
 
+func mustCachingGateway(t *testing.T, transport http.RoundTripper) *Gateway {
+	t.Helper()
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {Strategy: config.RoundRobin, Backends: []config.Backend{{URL: "http://backend.internal"}}},
+		},
+		Routes: []config.Route{{
+			PathPrefix:  "/",
+			BackendPool: "backend",
+			Cache:       &config.Cache{TTL: time.Minute, MaxEntries: 100},
+		}},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+	return gateway
+}
+
 func serveGatewayRequest(gateway *Gateway, path, remoteAddr string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.example"+path, nil)
 	request.RemoteAddr = remoteAddr
@@ -1035,10 +1228,15 @@ func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Respons
 var _ http.RoundTripper = roundTripperFunc(nil)
 
 func upstreamResponse(request *http.Request, status int) *http.Response {
+	return upstreamResponseWithBody(request, status, "")
+}
+
+func upstreamResponseWithBody(request *http.Request, status int, body string) *http.Response {
 	return &http.Response{
-		StatusCode: status,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader("")),
-		Request:    request,
+		StatusCode:    status,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       request,
 	}
 }
