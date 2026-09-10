@@ -100,3 +100,36 @@ func TestGatewayHandlerExposesCircuitBreakerStateMetrics(t *testing.T) {
 		t.Errorf("scrape does not contain %q", want)
 	}
 }
+
+func TestGatewayHandlerExposesHealthAndReadinessEndpoints(t *testing.T) {
+	t.Parallel()
+
+	gateway, err := proxy.NewGateway(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"users": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://users.internal"}},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/users", BackendPool: "users"}},
+	})
+	if err != nil {
+		t.Fatalf("NewGateway() error = %v", err)
+	}
+	handler := newGatewayHandler(config.Config{}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), gateway)
+
+	for path, wantBody := range map[string]string{
+		"/healthz": `{"status":"ok"}`,
+		"/readyz":  `{"status":"ready"}`,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, want %d", path, response.Code, http.StatusOK)
+		}
+		if got := strings.TrimSpace(response.Body.String()); got != wantBody {
+			t.Errorf("GET %s body = %q, want %q", path, got, wantBody)
+		}
+	}
+}

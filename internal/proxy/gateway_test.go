@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,55 @@ func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
 	}
 	if got := states["orders"]; got != breaker.StateClosed {
 		t.Errorf("orders breaker snapshot = %s, want %s", got, breaker.StateClosed)
+	}
+}
+
+func TestGatewayReportsPoolsWithoutAUsableRequestPath(t *testing.T) {
+	t.Parallel()
+
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"users": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{
+					{URL: "http://users-1.internal"},
+					{URL: "http://users-2.internal"},
+				},
+			},
+			"orders": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://orders.internal"}},
+			},
+		},
+		Routes: []config.Route{
+			{PathPrefix: "/users", BackendPool: "users"},
+			{PathPrefix: "/orders", BackendPool: "orders"},
+		},
+	}, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return upstreamResponse(request, http.StatusOK), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+	if got := gateway.UnavailablePools(); len(got) != 0 {
+		t.Fatalf("initial unavailable pools = %v, want none", got)
+	}
+
+	for _, backend := range gateway.pools["users"].balancer.Backends() {
+		backend.SetHealthy(false)
+	}
+	if err := gateway.pools["orders"].circuitBreaker.TransitionTo(breaker.StateOpen); err != nil {
+		t.Fatalf("open orders circuit breaker: %v", err)
+	}
+	if got, want := gateway.UnavailablePools(), []string{"orders", "users"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("unavailable pools = %v, want %v", got, want)
+	}
+
+	// One healthy backend is enough for the balancer to keep a pool available.
+	gateway.pools["users"].balancer.Backends()[0].SetHealthy(true)
+	if got, want := gateway.UnavailablePools(), []string{"orders"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("unavailable pools after users recovery = %v, want %v", got, want)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -226,6 +227,29 @@ func (g *Gateway) CircuitBreakerStates() map[string]breaker.State {
 		states[name] = backendPool.circuitBreaker.State()
 	}
 	return states
+}
+
+// UnavailablePools returns sorted pool names that cannot currently serve
+// normal traffic. A pool is unavailable when every backend is unhealthy or
+// its circuit breaker is not closed.
+func (g *Gateway) UnavailablePools() []string {
+	unavailable := make([]string, 0)
+	for name, backendPool := range g.pools {
+		if backendPool.circuitBreaker.State() != breaker.StateClosed || !hasHealthyBackend(backendPool.balancer.Backends()) {
+			unavailable = append(unavailable, name)
+		}
+	}
+	sort.Strings(unavailable)
+	return unavailable
+}
+
+func hasHealthyBackend(backends []*balancer.Backend) bool {
+	for _, backend := range backends {
+		if backend.Healthy() {
+			return true
+		}
+	}
+	return false
 }
 
 // NewTransport builds the shared upstream transport. Explicit timeouts from

@@ -115,6 +115,16 @@ series for every configured pool and possible state. Exactly one of the
 `closed`, `open`, and `half-open` series has value `1` for each pool, making
 state changes directly usable in alerts and dashboards.
 
+## Operational health probes
+
+`GET /healthz` is a liveness probe: a response confirms that the HTTP process
+and handler stack are running. `GET /readyz` is stricter and returns `503` with
+the unavailable pool names unless every configured backend pool has at least
+one healthy backend and a closed circuit breaker. This conservative definition
+means every configured route has a usable request path before the instance is
+considered ready. Probe responses are JSON, disable caching, and are excluded
+from customer request metrics.
+
 ## Response cache
 
 Caching is disabled unless a route supplies both `cache.ttl` and

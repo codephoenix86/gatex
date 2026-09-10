@@ -6,8 +6,8 @@ health-aware load balancing, per-client rate limiting, circuit breaking, API-key
 authentication, CORS, structured request logging, and opt-in in-memory response
 caching. It also provides Prometheus request, runtime, and process metrics,
 request deadlines and IDs, tuned upstream connection reuse, panic recovery, and
-graceful process shutdown. Gateway health endpoints and tracing are added in
-the remainder of the observability phase.
+graceful process shutdown. Operational liveness and readiness endpoints are
+also available; tracing is added in the remainder of the observability phase.
 
 See [the architecture notes](docs/architecture.md) and
 [the example configuration](configs/gateway.example.yaml) to get started.

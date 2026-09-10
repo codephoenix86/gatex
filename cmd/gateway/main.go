@@ -100,6 +100,12 @@ func newGatewayHandler(cfg config.Config, logger *slog.Logger, gateway http.Hand
 
 	router := http.NewServeMux()
 	router.Handle("/metrics", gatewayMetrics.Handler())
+	router.Handle("/healthz", metrics.HealthHandler())
+	if readiness, ok := gateway.(metrics.ReadinessSource); ok {
+		router.Handle("/readyz", metrics.ReadinessHandler(readiness))
+	} else {
+		router.Handle("/readyz", metrics.ReadinessHandler(nil))
+	}
 	router.Handle("/", gatewayPath)
 	return middleware.Recovery(logger)(router)
 }
