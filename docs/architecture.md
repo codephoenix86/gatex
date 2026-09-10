@@ -100,6 +100,17 @@ Request IDs are validated at the start of the middleware chain and returned to
 the client in `X-Request-ID`, so even requests rejected before proxying can be
 correlated with their log event.
 
+## Prometheus request metrics
+
+`GET /metrics` exposes Go runtime and process collectors plus gateway request
+counts, 5xx counts, and latency histograms. HTTP series use normalized methods,
+configured route prefixes, and status codes as labels; raw request paths are
+never labels, which prevents unbounded time-series growth from path parameters.
+The process-wide 5xx error rate can be calculated with
+`sum(rate(gatex_http_request_errors_total[5m])) / sum(rate(gatex_http_requests_total[5m]))`.
+The scrape endpoint itself bypasses gateway request instrumentation so each
+Prometheus scrape does not alter the measurements it is collecting.
+
 ## Response cache
 
 Caching is disabled unless a route supplies both `cache.ttl` and

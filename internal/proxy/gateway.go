@@ -259,6 +259,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no route configured for request path", http.StatusNotFound)
 		return
 	}
+	requestmeta.SetRoute(r.Context(), matchedRoute.pathPrefix)
 	matchedRoute.handler.ServeHTTP(w, r)
 }
 

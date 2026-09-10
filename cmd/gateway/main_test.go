@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/codephoenix86/gatex/internal/config"
@@ -49,5 +50,25 @@ func TestGatewayHandlerLogsCORSPreflightBeforeRouteHandling(t *testing.T) {
 	}
 	if got := response.Header().Get("X-Request-ID"); got != requestID {
 		t.Errorf("response request ID = %q, want logged ID %q", got, requestID)
+	}
+}
+
+func TestGatewayHandlerExposesPrometheusRequestMetrics(t *testing.T) {
+	t.Parallel()
+
+	handler := newGatewayHandler(config.Config{}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/work", nil))
+
+	scrape := httptest.NewRecorder()
+	handler.ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if scrape.Code != http.StatusOK {
+		t.Fatalf("scrape status = %d, want %d", scrape.Code, http.StatusOK)
+	}
+	want := `gatex_http_requests_total{method="GET",route="unmatched",status="202"} 1`
+	if !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("scrape does not contain %q", want)
 	}
 }

@@ -50,4 +50,8 @@ func TestBackendMetadata(t *testing.T) {
 	if got := Backend(request.Context()); got != "http://backend.internal" {
 		t.Errorf("backend = %q, want %q", got, "http://backend.internal")
 	}
+	SetRoute(request.Context(), "/api")
+	if got := Route(request.Context()); got != "/api" {
+		t.Errorf("route = %q, want %q", got, "/api")
+	}
 }

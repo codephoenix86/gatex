@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/codephoenix86/gatex/internal/config"
+	"github.com/codephoenix86/gatex/internal/metrics"
 	"github.com/codephoenix86/gatex/internal/middleware"
 	"github.com/codephoenix86/gatex/internal/proxy"
 )
@@ -80,9 +81,10 @@ func main() {
 // innermost. Route-specific authentication and rate limiting are composed by
 // proxy.NewGateway after route matching.
 func newGatewayHandler(cfg config.Config, logger *slog.Logger, gateway http.Handler) http.Handler {
-	return middleware.Chain(
-		middleware.Recovery(logger),
+	gatewayMetrics := metrics.New()
+	gatewayPath := middleware.Chain(
 		middleware.RequestLogger(logger),
+		gatewayMetrics.Instrument,
 		middleware.CORS(middleware.CORSOptions{
 			AllowedOrigins:   cfg.CORS.AllowedOrigins,
 			AllowedMethods:   cfg.CORS.AllowedMethods,
@@ -92,4 +94,9 @@ func newGatewayHandler(cfg config.Config, logger *slog.Logger, gateway http.Hand
 			MaxAge:           cfg.CORS.MaxAge,
 		}),
 	)(gateway)
+
+	router := http.NewServeMux()
+	router.Handle("/metrics", gatewayMetrics.Handler())
+	router.Handle("/", gatewayPath)
+	return middleware.Recovery(logger)(router)
 }

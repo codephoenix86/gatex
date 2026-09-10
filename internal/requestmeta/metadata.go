@@ -20,6 +20,7 @@ type metadata struct {
 
 	mu      sync.RWMutex
 	backend string
+	route   string
 }
 
 // Ensure returns a request carrying validated request metadata. The incoming
@@ -67,6 +68,29 @@ func Backend(ctx context.Context) string {
 	values.mu.RLock()
 	defer values.mu.RUnlock()
 	return values.backend
+}
+
+// SetRoute records the bounded route pattern matched for this request. It is a
+// no-op when request metadata has not been installed.
+func SetRoute(ctx context.Context, route string) {
+	values := current(ctx)
+	if values == nil {
+		return
+	}
+	values.mu.Lock()
+	values.route = route
+	values.mu.Unlock()
+}
+
+// Route returns the configured route pattern matched for this request, if any.
+func Route(ctx context.Context) string {
+	values := current(ctx)
+	if values == nil {
+		return ""
+	}
+	values.mu.RLock()
+	defer values.mu.RUnlock()
+	return values.route
 }
 
 func current(ctx context.Context) *metadata {
