@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +19,47 @@ import (
 	"github.com/codephoenix86/gatex/internal/config"
 	"github.com/codephoenix86/gatex/internal/middleware"
 )
+
+func TestGatewayRequestLogIncludesSelectedBackend(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	gateway, err := NewGatewayWithTransport(config.Config{
+		ListenAddress: ":8080",
+		BackendPools: map[string]config.Pool{
+			"backend": {
+				Strategy: config.RoundRobin,
+				Backends: []config.Backend{{URL: "http://backend.internal/base"}},
+			},
+		},
+		Routes: []config.Route{{PathPrefix: "/", BackendPool: "backend"}},
+	}, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return upstreamResponse(request, http.StatusNoContent), nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGatewayWithTransport() error = %v", err)
+	}
+	handler := middleware.RequestLogger(slog.New(slog.NewJSONHandler(&logs, nil)))(gateway)
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example/work", nil)
+	request.Header.Set(RequestIDHeader, "logged-request")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("decode structured log %q: %v", logs.String(), err)
+	}
+	if got := entry["request_id"]; got != "logged-request" {
+		t.Errorf("logged request ID = %v, want %q", got, "logged-request")
+	}
+	if got := entry["backend"]; got != "http://backend.internal/base" {
+		t.Errorf("logged backend = %v, want %q", got, "http://backend.internal/base")
+	}
+}
 
 func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
 	t.Parallel()

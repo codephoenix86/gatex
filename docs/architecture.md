@@ -89,6 +89,17 @@ Responses unwind through the same handlers in reverse order. In particular,
 the access logger observes the final status and latency after the inner request
 path completes.
 
+## Structured request logs
+
+The outer request logger emits one JSON completion event for every request,
+including preflight and gateway-generated error responses. Each event records
+the request ID, method, path, host, remote address, final status, response size,
+and total gateway latency. Once load balancing selects an upstream, the event
+also records that backend URL without URL credentials or query parameters.
+Request IDs are validated at the start of the middleware chain and returned to
+the client in `X-Request-ID`, so even requests rejected before proxying can be
+correlated with their log event.
+
 ## Response cache
 
 Caching is disabled unless a route supplies both `cache.ttl` and

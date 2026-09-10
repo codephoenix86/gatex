@@ -4,9 +4,9 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
-)
 
-const requestIDHeader = "X-Request-ID"
+	"github.com/codephoenix86/gatex/internal/requestmeta"
+)
 
 // RequestLogger writes one structured completion event for every request. A
 // nil logger uses slog.Default.
@@ -17,8 +17,10 @@ func RequestLogger(logger *slog.Logger) Middleware {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = requestmeta.Ensure(r)
 			startedAt := time.Now()
 			response := &loggingResponseWriter{ResponseWriter: w}
+			response.Header().Set(requestmeta.IDHeader, requestmeta.RequestID(r.Context()))
 
 			defer func() {
 				recovered := recover()
@@ -87,10 +89,6 @@ func logCompletedRequest(logger *slog.Logger, request *http.Request, response *l
 		level = slog.LevelWarn
 	}
 
-	requestID := response.Header().Get(requestIDHeader)
-	if requestID == "" {
-		requestID = request.Header.Get(requestIDHeader)
-	}
 	attributes := []slog.Attr{
 		slog.String("method", request.Method),
 		slog.String("path", request.URL.Path),
@@ -99,9 +97,10 @@ func logCompletedRequest(logger *slog.Logger, request *http.Request, response *l
 		slog.Int("status", status),
 		slog.Int64("response_bytes", response.bytesWritten),
 		slog.Duration("duration", duration),
+		slog.String("request_id", requestmeta.RequestID(request.Context())),
 	}
-	if requestID != "" {
-		attributes = append(attributes, slog.String("request_id", requestID))
+	if backend := requestmeta.Backend(request.Context()); backend != "" {
+		attributes = append(attributes, slog.String("backend", backend))
 	}
 	logger.LogAttrs(request.Context(), level, "request completed", attributes...)
 }

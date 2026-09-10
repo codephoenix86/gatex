@@ -29,10 +29,8 @@ func (r *route) cacheResponses() middleware.Middleware {
 				return
 			}
 
-			requestID := incomingOrNewRequestID(request.Header.Get(RequestIDHeader))
-			requestWithID := request.Clone(request.Context())
-			requestWithID.Header.Set(RequestIDHeader, requestID)
-			key := responseCacheKey(requestWithID)
+			requestID := RequestID(request.Context())
+			key := responseCacheKey(request)
 			if cached, ok := r.responseCache.Get(key); ok {
 				writeCachedResponse(w, cached, requestID)
 				return
@@ -40,7 +38,7 @@ func (r *route) cacheResponses() middleware.Middleware {
 
 			w.Header().Set(CacheStatusHeader, cacheMiss)
 			capture := &cacheResponseWriter{ResponseWriter: w}
-			next.ServeHTTP(capture, requestWithID)
+			next.ServeHTTP(capture, request)
 			if response, ok := capture.response(); ok {
 				response.Header.Del(RequestIDHeader)
 				response.Header.Del(CacheStatusHeader)

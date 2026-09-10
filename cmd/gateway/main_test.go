@@ -43,4 +43,11 @@ func TestGatewayHandlerLogsCORSPreflightBeforeRouteHandling(t *testing.T) {
 	if got := entry["status"]; got != float64(http.StatusNoContent) {
 		t.Errorf("logged status = %v, want %d", got, http.StatusNoContent)
 	}
+	requestID, ok := entry["request_id"].(string)
+	if !ok || requestID == "" {
+		t.Errorf("logged request ID = %v, want a non-empty string", entry["request_id"])
+	}
+	if got := response.Header().Get("X-Request-ID"); got != requestID {
+		t.Errorf("response request ID = %q, want logged ID %q", got, requestID)
+	}
 }

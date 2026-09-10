@@ -3,8 +3,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -24,11 +22,12 @@ import (
 	"github.com/codephoenix86/gatex/internal/config"
 	"github.com/codephoenix86/gatex/internal/middleware"
 	"github.com/codephoenix86/gatex/internal/ratelimiter"
+	"github.com/codephoenix86/gatex/internal/requestmeta"
 )
 
 const (
 	// RequestIDHeader is forwarded to upstreams and returned to callers.
-	RequestIDHeader = "X-Request-ID"
+	RequestIDHeader = requestmeta.IDHeader
 
 	defaultRequestTimeout        = 15 * time.Second
 	defaultDialTimeout           = 2 * time.Second
@@ -37,15 +36,13 @@ const (
 	defaultIdleConnectionTimeout = 90 * time.Second
 )
 
-type requestIDContextKey struct{}
 type breakerPermitContextKey struct{}
 
 var errNoHealthyBackends = errors.New("no healthy backends available")
 
 // RequestID returns the request ID attached by Gateway, if present.
 func RequestID(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDContextKey{}).(string)
-	return id
+	return requestmeta.RequestID(ctx)
 }
 
 // Gateway routes requests to configured backend pools.
@@ -255,6 +252,8 @@ func (g *Gateway) CloseIdleConnections() {
 // ServeHTTP matches the most-specific route prefix and delegates to its
 // configured middleware and proxy request path.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = requestmeta.Ensure(r)
+	w.Header().Set(RequestIDHeader, RequestID(r.Context()))
 	matchedRoute := g.matchRoute(r.URL.Path)
 	if matchedRoute == nil {
 		http.Error(w, "no route configured for request path", http.StatusNotFound)
@@ -266,16 +265,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveRoute applies request-scoped gateway behavior and delegates the backend
 // call to httputil.ReverseProxy.
 func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRoute *route) {
-	requestID := incomingOrNewRequestID(r.Header.Get(RequestIDHeader))
 	ctx, cancel := context.WithTimeout(r.Context(), g.requestTimeout)
 	defer cancel()
-	ctx = context.WithValue(ctx, requestIDContextKey{}, requestID)
 
 	request := r.Clone(ctx)
-	request.Header.Set(RequestIDHeader, requestID)
 	upstream, permit, err := matchedRoute.pool.acquire()
 	if err != nil {
-		w.Header().Set(RequestIDHeader, requestID)
 		switch {
 		case errors.Is(err, breaker.ErrOpen):
 			http.Error(w, "backend circuit breaker is open", http.StatusServiceUnavailable)
@@ -286,6 +281,7 @@ func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRout
 		}
 		return
 	}
+	requestmeta.SetBackend(request.Context(), backendLogValue(upstream.target))
 	defer upstream.backend.Release()
 	request = request.WithContext(context.WithValue(request.Context(), breakerPermitContextKey{}, permit))
 	upstream.proxy.ServeHTTP(w, request)
@@ -294,17 +290,13 @@ func (g *Gateway) serveRoute(w http.ResponseWriter, r *http.Request, matchedRout
 func (r *route) rateLimit() middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			requestID := incomingOrNewRequestID(request.Header.Get(RequestIDHeader))
 			if !r.limiter.Allow(clientKeyFromRemoteAddr(request.RemoteAddr)) {
-				w.Header().Set(RequestIDHeader, requestID)
 				w.Header().Set("Retry-After", r.retryAfterHeader)
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
 
-			requestWithID := request.Clone(request.Context())
-			requestWithID.Header.Set(RequestIDHeader, requestID)
-			next.ServeHTTP(w, requestWithID)
+			next.ServeHTTP(w, request)
 		})
 	}
 }
@@ -448,29 +440,8 @@ func retryAfterValue(requestsPerSecond float64) string {
 	return strconv.FormatInt(int64(seconds), 10)
 }
 
-func incomingOrNewRequestID(incoming string) string {
-	if isSafeRequestID(incoming) {
-		return incoming
-	}
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err == nil {
-		return hex.EncodeToString(bytes)
-	}
-	// crypto/rand failures are exceptionally rare. A timestamp still provides
-	// an identifier for log correlation without failing a customer request.
-	return fmt.Sprintf("%x", time.Now().UnixNano())
-}
-
-func isSafeRequestID(value string) bool {
-	if value == "" || len(value) > 128 {
-		return false
-	}
-	for _, char := range value {
-		if char < 0x21 || char > 0x7e {
-			return false
-		}
-	}
-	return true
+func backendLogValue(target *url.URL) string {
+	return target.Scheme + "://" + target.Host + target.EscapedPath()
 }
 
 func withDefault(value, fallback time.Duration) time.Duration {

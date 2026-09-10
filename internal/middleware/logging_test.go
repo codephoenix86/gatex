@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/codephoenix86/gatex/internal/requestmeta"
 )
 
 func TestRequestLoggerRecordsStructuredResponseDetails(t *testing.T) {
@@ -15,12 +17,13 @@ func TestRequestLoggerRecordsStructuredResponseDetails(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	handler := RequestLogger(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(requestIDHeader, "request-123")
+	handler := RequestLogger(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestmeta.SetBackend(r.Context(), "http://backend.internal")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, "hello")
 	}))
 	request := httptest.NewRequest(http.MethodPost, "http://gateway.example/resources?secret=hidden", nil)
+	request.Header.Set(requestmeta.IDHeader, "request-123")
 	request.RemoteAddr = "192.0.2.10:4321"
 	response := httptest.NewRecorder()
 
@@ -35,6 +38,10 @@ func TestRequestLoggerRecordsStructuredResponseDetails(t *testing.T) {
 	assertLogValue(t, entry, "status", float64(http.StatusCreated))
 	assertLogValue(t, entry, "response_bytes", float64(len("hello")))
 	assertLogValue(t, entry, "request_id", "request-123")
+	assertLogValue(t, entry, "backend", "http://backend.internal")
+	if got := response.Header().Get(requestmeta.IDHeader); got != "request-123" {
+		t.Errorf("response request ID = %q, want %q", got, "request-123")
+	}
 	if _, ok := entry["duration"]; !ok {
 		t.Error("structured log has no duration")
 	}
