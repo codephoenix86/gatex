@@ -109,6 +109,13 @@ func TestGatewayCreatesClosedCircuitBreakerPerPool(t *testing.T) {
 	if got := ordersBreaker.State(); got != breaker.StateClosed {
 		t.Errorf("orders breaker state after users transition = %s, want %s", got, breaker.StateClosed)
 	}
+	states := gateway.CircuitBreakerStates()
+	if got := states["users"]; got != breaker.StateOpen {
+		t.Errorf("users breaker snapshot = %s, want %s", got, breaker.StateOpen)
+	}
+	if got := states["orders"]; got != breaker.StateClosed {
+		t.Errorf("orders breaker snapshot = %s, want %s", got, breaker.StateClosed)
+	}
 }
 
 func TestGatewayTripsCircuitBreakerAfterConsecutiveUpstreamFailures(t *testing.T) {

@@ -61,6 +61,12 @@ func New() *Recorder {
 	}
 }
 
+// RegisterCircuitBreakers adds live, per-pool circuit-breaker states to this
+// recorder. A recorder should register at most one source.
+func (m *Recorder) RegisterCircuitBreakers(source CircuitBreakerStateSource) {
+	m.registry.MustRegister(newCircuitBreakerCollector(source))
+}
+
 // Instrument records request count, 5xx count, and latency after next
 // completes. Route labels use configured path prefixes rather than raw paths
 // to keep Prometheus label cardinality bounded.

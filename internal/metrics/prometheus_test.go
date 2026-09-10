@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codephoenix86/gatex/internal/breaker"
 	"github.com/codephoenix86/gatex/internal/requestmeta"
 )
 
@@ -52,4 +53,44 @@ func TestRecorderBoundsUnmatchedRouteAndMethodLabels(t *testing.T) {
 	if !strings.Contains(scrape.Body.String(), metric) {
 		t.Errorf("scrape does not contain %q", metric)
 	}
+}
+
+func TestRecorderExposesOneHotCircuitBreakerStates(t *testing.T) {
+	t.Parallel()
+
+	states := staticCircuitBreakerStates{
+		"users":  breaker.StateClosed,
+		"orders": breaker.StateHalfOpen,
+	}
+	recorder := New()
+	recorder.RegisterCircuitBreakers(states)
+
+	scrape := httptest.NewRecorder()
+	recorder.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	for _, metric := range []string{
+		`gatex_circuit_breaker_state{pool="users",state="closed"} 1`,
+		`gatex_circuit_breaker_state{pool="users",state="open"} 0`,
+		`gatex_circuit_breaker_state{pool="users",state="half-open"} 0`,
+		`gatex_circuit_breaker_state{pool="orders",state="closed"} 0`,
+		`gatex_circuit_breaker_state{pool="orders",state="open"} 0`,
+		`gatex_circuit_breaker_state{pool="orders",state="half-open"} 1`,
+	} {
+		if !strings.Contains(scrape.Body.String(), metric) {
+			t.Errorf("scrape does not contain %q", metric)
+		}
+	}
+
+	states["users"] = breaker.StateOpen
+	updatedScrape := httptest.NewRecorder()
+	recorder.Handler().ServeHTTP(updatedScrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metric := `gatex_circuit_breaker_state{pool="users",state="open"} 1`; !strings.Contains(updatedScrape.Body.String(), metric) {
+		t.Errorf("updated scrape does not contain %q", metric)
+	}
+}
+
+type staticCircuitBreakerStates map[string]breaker.State
+
+func (states staticCircuitBreakerStates) CircuitBreakerStates() map[string]breaker.State {
+	return states
 }

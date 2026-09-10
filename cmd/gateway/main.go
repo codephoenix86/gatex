@@ -82,6 +82,9 @@ func main() {
 // proxy.NewGateway after route matching.
 func newGatewayHandler(cfg config.Config, logger *slog.Logger, gateway http.Handler) http.Handler {
 	gatewayMetrics := metrics.New()
+	if breakerStates, ok := gateway.(metrics.CircuitBreakerStateSource); ok {
+		gatewayMetrics.RegisterCircuitBreakers(breakerStates)
+	}
 	gatewayPath := middleware.Chain(
 		middleware.RequestLogger(logger),
 		gatewayMetrics.Instrument,

@@ -218,6 +218,16 @@ func (g *Gateway) WaitForHealthChecks() {
 	g.healthChecksDone.Wait()
 }
 
+// CircuitBreakerStates returns a point-in-time state snapshot keyed by backend
+// pool name. The returned map is independent from the Gateway's internal map.
+func (g *Gateway) CircuitBreakerStates() map[string]breaker.State {
+	states := make(map[string]breaker.State, len(g.pools))
+	for name, backendPool := range g.pools {
+		states[name] = backendPool.circuitBreaker.State()
+	}
+	return states
+}
+
 // NewTransport builds the shared upstream transport. Explicit timeouts from
 // configuration win; safe defaults ensure the proxy never uses unbounded dial
 // or response-header waits. The idle-connection limits prevent a busy gateway

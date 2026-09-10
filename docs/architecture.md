@@ -110,6 +110,10 @@ The process-wide 5xx error rate can be calculated with
 `sum(rate(gatex_http_request_errors_total[5m])) / sum(rate(gatex_http_requests_total[5m]))`.
 The scrape endpoint itself bypasses gateway request instrumentation so each
 Prometheus scrape does not alter the measurements it is collecting.
+Circuit-breaker state is exported as `gatex_circuit_breaker_state`, with one
+series for every configured pool and possible state. Exactly one of the
+`closed`, `open`, and `half-open` series has value `1` for each pool, making
+state changes directly usable in alerts and dashboards.
 
 ## Response cache
 
