@@ -62,8 +62,8 @@ func TestGatewayEndToEndHandlesConcurrentTrafficAndProbes(t *testing.T) {
 				return
 			}
 			body, readErr := io.ReadAll(response.Body)
-			response.Body.Close()
-			if readErr != nil || response.StatusCode != http.StatusOK ||
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK ||
 				(string(body) != "first" && string(body) != "second") ||
 				response.Header.Get(proxy.RequestIDHeader) != request.Header.Get(proxy.RequestIDHeader) {
 				failures.Add(1)
@@ -88,8 +88,8 @@ func TestGatewayEndToEndHandlesConcurrentTrafficAndProbes(t *testing.T) {
 				return
 			}
 			body, readErr := io.ReadAll(response.Body)
-			response.Body.Close()
-			if readErr != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), wantBody) {
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), wantBody) {
 				failures.Add(1)
 			}
 		}()

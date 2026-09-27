@@ -341,7 +341,11 @@ func sendIntegrationRequest(t *testing.T, client *http.Client, request *http.Req
 	if err != nil {
 		t.Fatalf("Do(%s %s) error = %v", request.Method, request.URL, err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close %s %s response: %v", request.Method, request.URL, err)
+		}
+	}()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatalf("read %s %s response: %v", request.Method, request.URL, err)

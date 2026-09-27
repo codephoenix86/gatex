@@ -146,15 +146,6 @@ func mustBucket(t *testing.T, tokensPerSecond float64, burst int, now func() tim
 	return bucket
 }
 
-func assertAllows(t *testing.T, bucket *Bucket, want ...bool) {
-	t.Helper()
-	for index, expected := range want {
-		if got := bucket.Allow(); got != expected {
-			t.Fatalf("Allow() call %d = %t, want %t", index+1, got, expected)
-		}
-	}
-}
-
 type fakeClock struct {
 	mu  sync.Mutex
 	now time.Time

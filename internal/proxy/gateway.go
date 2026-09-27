@@ -375,18 +375,12 @@ func (p *pool) acquire() (*upstream, *breaker.Permit, error) {
 
 func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
-		Director: func(request *http.Request) {
-			originalHost := request.Host
-			rewriteRequestURL(request.URL, target)
-			request.Host = target.Host
-			request.Header.Del(middleware.APIKeyHeader)
-			request.Header.Set(RequestIDHeader, RequestID(request.Context()))
-			request.Header.Set("X-Forwarded-Host", originalHost)
-			if request.TLS != nil {
-				request.Header.Set("X-Forwarded-Proto", "https")
-			} else {
-				request.Header.Set("X-Forwarded-Proto", "http")
-			}
+		Rewrite: func(request *httputil.ProxyRequest) {
+			rewriteRequestURL(request.Out.URL, target)
+			request.Out.Host = target.Host
+			request.Out.Header.Del(middleware.APIKeyHeader)
+			request.Out.Header.Set(RequestIDHeader, RequestID(request.Out.Context()))
+			request.SetXForwarded()
 		},
 		Transport:  transport,
 		BufferPool: sharedReverseProxyBufferPool,

@@ -75,16 +75,16 @@ func TestClientLimiterRefillsIndependentClientsUnderConcurrentLoad(t *testing.T)
 	limiter := mustClientLimiter(t, 4, burst, clock)
 
 	initialAllowed := runConcurrentClientRequests(limiter, clients, requestsPerClient)
-	for client, allowed := range initialAllowed {
-		if got := allowed.Load(); got != burst {
+	for client := range initialAllowed {
+		if got := initialAllowed[client].Load(); got != burst {
 			t.Errorf("client %d initial allowed requests = %d, want %d", client, got, burst)
 		}
 	}
 
 	clock.Advance(500 * time.Millisecond)
 	refillAllowed := runConcurrentClientRequests(limiter, clients, requestsPerClient)
-	for client, allowed := range refillAllowed {
-		if got := allowed.Load(); got != 2 {
+	for client := range refillAllowed {
+		if got := refillAllowed[client].Load(); got != 2 {
 			t.Errorf("client %d allowed requests after refill = %d, want 2", client, got)
 		}
 	}

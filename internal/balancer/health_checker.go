@@ -128,8 +128,8 @@ func (h *HealthChecker) checkBackend(ctx context.Context, backend *Backend) {
 		backend.SetHealthy(false)
 		return
 	}
-	response.Body.Close()
-	backend.SetHealthy(response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusBadRequest)
+	closeErr := response.Body.Close()
+	backend.SetHealthy(closeErr == nil && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusBadRequest)
 }
 
 func healthCheckURL(backendURL, path string) (string, error) {
