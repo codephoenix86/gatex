@@ -266,8 +266,8 @@ func NewTransport(timeouts config.Timeouts) *http.Transport {
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   500,
 		IdleConnTimeout:       withDefault(timeouts.IdleConnection, defaultIdleConnectionTimeout),
 		TLSHandshakeTimeout:   withDefault(timeouts.TLSHandshake, defaultTLSHandshakeTimeout),
 		ResponseHeaderTimeout: withDefault(timeouts.ResponseHeader, defaultResponseHeaderTimeout),
@@ -388,7 +388,8 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper) *httputil.Rev
 				request.Header.Set("X-Forwarded-Proto", "http")
 			}
 		},
-		Transport: transport,
+		Transport:  transport,
+		BufferPool: sharedReverseProxyBufferPool,
 		ModifyResponse: func(response *http.Response) error {
 			if response.StatusCode >= http.StatusInternalServerError && response.StatusCode < 600 {
 				breakerPermit(response.Request.Context()).RecordFailure()
