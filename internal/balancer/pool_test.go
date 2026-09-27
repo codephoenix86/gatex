@@ -119,90 +119,94 @@ func TestBackendState(t *testing.T) {
 	}
 }
 
-func TestPoolAcquireRoundRobin(t *testing.T) {
+func TestPoolAcquire(t *testing.T) {
 	t.Parallel()
 
-	pool, err := NewPoolWithStrategy([]string{
+	urls := []string{
 		"http://users-1.internal",
 		"http://users-2.internal",
 		"http://users-3.internal",
-	}, RoundRobin)
-	if err != nil {
-		t.Fatalf("NewPoolWithStrategy() error = %v", err)
+	}
+	tests := []struct {
+		name              string
+		strategy          Strategy
+		healthy           []bool
+		activeConnections []int
+		wantURLs          []string
+		wantAvailable     bool
+	}{
+		{
+			name:          "round robin rotates through every backend",
+			strategy:      RoundRobin,
+			wantURLs:      []string{urls[0], urls[1], urls[2], urls[0]},
+			wantAvailable: true,
+		},
+		{
+			name:          "round robin advances past an unhealthy backend",
+			strategy:      RoundRobin,
+			healthy:       []bool{false, true, true},
+			wantURLs:      []string{urls[1], urls[2], urls[1], urls[2]},
+			wantAvailable: true,
+		},
+		{
+			name:              "least connections selects the least busy backend",
+			strategy:          LeastConnections,
+			activeConnections: []int{2, 1, 0},
+			wantURLs:          []string{urls[2]},
+			wantAvailable:     true,
+		},
+		{
+			name:              "least connections skips an unhealthy idle backend",
+			strategy:          LeastConnections,
+			healthy:           []bool{false, true, true},
+			activeConnections: []int{0, 1, 2},
+			wantURLs:          []string{urls[1]},
+			wantAvailable:     true,
+		},
+		{
+			name:          "no strategy selects an unhealthy backend",
+			strategy:      RoundRobin,
+			healthy:       []bool{false, false, false},
+			wantAvailable: false,
+		},
 	}
 
-	wantURLs := []string{
-		"http://users-1.internal",
-		"http://users-2.internal",
-		"http://users-3.internal",
-		"http://users-1.internal",
-	}
-	for index, wantURL := range wantURLs {
-		backend, ok := pool.Acquire()
-		if !ok {
-			t.Fatalf("Acquire() selected no backend at request %d", index)
-		}
-		if got := backend.URL(); got != wantURL {
-			t.Errorf("Acquire() backend at request %d = %q, want %q", index, got, wantURL)
-		}
-		backend.Release()
-	}
-}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestPoolAcquireLeastConnections(t *testing.T) {
-	t.Parallel()
+			pool, err := NewPoolWithStrategy(urls, test.strategy)
+			if err != nil {
+				t.Fatalf("NewPoolWithStrategy() error = %v", err)
+			}
+			backends := pool.Backends()
+			for index, healthy := range test.healthy {
+				backends[index].SetHealthy(healthy)
+			}
+			for index, active := range test.activeConnections {
+				for range active {
+					backends[index].Acquire()
+				}
+			}
 
-	pool, err := NewPoolWithStrategy([]string{
-		"http://users-1.internal",
-		"http://users-2.internal",
-		"http://users-3.internal",
-	}, LeastConnections)
-	if err != nil {
-		t.Fatalf("NewPoolWithStrategy() error = %v", err)
-	}
-	backends := pool.Backends()
-	backends[0].Acquire()
-	backends[0].Acquire()
-	backends[1].Acquire()
+			for request, wantURL := range test.wantURLs {
+				backend, ok := pool.Acquire()
+				if !ok {
+					t.Fatalf("Acquire() selected no backend at request %d", request)
+				}
+				if got := backend.URL(); got != wantURL {
+					t.Errorf("Acquire() backend at request %d = %q, want %q", request, got, wantURL)
+				}
+				backend.Release()
+			}
 
-	backend, ok := pool.Acquire()
-	if !ok {
-		t.Fatal("Acquire() selected no backend")
-	}
-	if got, want := backend.URL(), "http://users-3.internal"; got != want {
-		t.Errorf("Acquire() backend = %q, want %q", got, want)
-	}
-	backend.Release()
-	backends[0].Release()
-	backends[0].Release()
-	backends[1].Release()
-}
-
-func TestPoolAcquireSkipsUnhealthyBackends(t *testing.T) {
-	t.Parallel()
-
-	pool, err := NewPoolWithStrategy([]string{
-		"http://users-1.internal",
-		"http://users-2.internal",
-	}, RoundRobin)
-	if err != nil {
-		t.Fatalf("NewPoolWithStrategy() error = %v", err)
-	}
-	backends := pool.Backends()
-	backends[0].SetHealthy(false)
-
-	backend, ok := pool.Acquire()
-	if !ok {
-		t.Fatal("Acquire() selected no backend")
-	}
-	if got, want := backend.URL(), "http://users-2.internal"; got != want {
-		t.Errorf("Acquire() backend = %q, want %q", got, want)
-	}
-	backend.Release()
-
-	backends[1].SetHealthy(false)
-	if backend, ok := pool.Acquire(); ok || backend != nil {
-		t.Errorf("Acquire() = (%v, %t), want (nil, false)", backend, ok)
+			if test.wantAvailable {
+				return
+			}
+			if backend, ok := pool.Acquire(); ok || backend != nil {
+				t.Errorf("Acquire() = (%v, %t), want (nil, false)", backend, ok)
+			}
+		})
 	}
 }
 

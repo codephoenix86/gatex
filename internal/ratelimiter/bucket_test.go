@@ -34,46 +34,76 @@ func TestNewBucketRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestBucketStartsFullAndRefillsLazily(t *testing.T) {
-	t.Parallel()
-
-	clock := newFakeClock(time.Unix(1_700_000_000, 0))
-	bucket := mustBucket(t, 4, 3, clock.Now)
-
-	assertAllows(t, bucket, true, true, true, false)
-
-	clock.Advance(250 * time.Millisecond)
-	assertAllows(t, bucket, true, false)
-
-	clock.Advance(10 * time.Second)
-	assertAllows(t, bucket, true, true, true, false)
-}
-
-func TestBucketPreservesFractionalTokens(t *testing.T) {
-	t.Parallel()
-
-	clock := newFakeClock(time.Unix(1_700_000_000, 0))
-	bucket := mustBucket(t, 2, 1, clock.Now)
-
-	assertAllows(t, bucket, true, false)
-	clock.Advance(250 * time.Millisecond)
-	assertAllows(t, bucket, false)
-	clock.Advance(250 * time.Millisecond)
-	assertAllows(t, bucket, true, false)
-}
-
-func TestBucketIgnoresClockMovingBackward(t *testing.T) {
+func TestBucketAllowance(t *testing.T) {
 	t.Parallel()
 
 	start := time.Unix(1_700_000_000, 0)
-	clock := newFakeClock(start)
-	bucket := mustBucket(t, 1, 1, clock.Now)
+	tests := []struct {
+		name            string
+		tokensPerSecond float64
+		burst           int
+		steps           []bucketStep
+	}{
+		{
+			name:            "starts full and refills lazily up to capacity",
+			tokensPerSecond: 4,
+			burst:           3,
+			steps: []bucketStep{
+				{at: 0, want: true},
+				{at: 0, want: true},
+				{at: 0, want: true},
+				{at: 0, want: false},
+				{at: 250 * time.Millisecond, want: true},
+				{at: 250 * time.Millisecond, want: false},
+				{at: 10 * time.Second, want: true},
+				{at: 10 * time.Second, want: true},
+				{at: 10 * time.Second, want: true},
+				{at: 10 * time.Second, want: false},
+			},
+		},
+		{
+			name:            "preserves fractional tokens between requests",
+			tokensPerSecond: 2,
+			burst:           1,
+			steps: []bucketStep{
+				{at: 0, want: true},
+				{at: 0, want: false},
+				{at: 250 * time.Millisecond, want: false},
+				{at: 500 * time.Millisecond, want: true},
+				{at: 500 * time.Millisecond, want: false},
+			},
+		},
+		{
+			name:            "does not refill when the clock moves backward",
+			tokensPerSecond: 1,
+			burst:           1,
+			steps: []bucketStep{
+				{at: 0, want: true},
+				{at: -time.Second, want: false},
+				{at: time.Second, want: true},
+			},
+		},
+	}
 
-	assertAllows(t, bucket, true)
-	clock.Set(start.Add(-time.Second))
-	assertAllows(t, bucket, false)
-	clock.Set(start.Add(time.Second))
-	assertAllows(t, bucket, true)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			clock := newFakeClock(start)
+			bucket := mustBucket(t, test.tokensPerSecond, test.burst, clock.Now)
+			for index, step := range test.steps {
+				clock.Set(start.Add(step.at))
+				if got := bucket.Allow(); got != step.want {
+					t.Errorf("Allow() at step %d (%s) = %t, want %t", index, step.at, got, step.want)
+				}
+			}
+		})
+	}
+}
+
+type bucketStep struct {
+	at   time.Duration
+	want bool
 }
 
 func TestBucketAllowsAtMostBurstConcurrentRequests(t *testing.T) {

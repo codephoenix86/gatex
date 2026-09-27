@@ -303,75 +303,61 @@ func TestBreakerCountsConcurrentFailuresSafely(t *testing.T) {
 	}
 }
 
-func TestBreakerTransitionsThroughRecoveryCycle(t *testing.T) {
-	t.Parallel()
-
-	circuitBreaker := New()
-	wantStates := []State{StateOpen, StateHalfOpen, StateClosed}
-	for _, want := range wantStates {
-		if err := circuitBreaker.TransitionTo(want); err != nil {
-			t.Fatalf("TransitionTo(%s) error = %v", want, err)
-		}
-		if got := circuitBreaker.State(); got != want {
-			t.Fatalf("State() = %s, want %s", got, want)
-		}
-	}
-}
-
-func TestHalfOpenBreakerCanReopen(t *testing.T) {
-	t.Parallel()
-
-	circuitBreaker := New()
-	for _, state := range []State{StateOpen, StateHalfOpen, StateOpen} {
-		if err := circuitBreaker.TransitionTo(state); err != nil {
-			t.Fatalf("TransitionTo(%s) error = %v", state, err)
-		}
-	}
-	if got := circuitBreaker.State(); got != StateOpen {
-		t.Errorf("State() = %s, want %s", got, StateOpen)
-	}
-}
-
-func TestBreakerRejectsInvalidTransitions(t *testing.T) {
+func TestBreakerTransitionTo(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		start   State
 		next    State
+		want    State
 		wantErr error
 	}{
-		{name: "closed to half-open", start: StateClosed, next: StateHalfOpen, wantErr: ErrInvalidTransition},
-		{name: "open to closed", start: StateOpen, next: StateClosed, wantErr: ErrInvalidTransition},
-		{name: "unknown state", start: StateClosed, next: State(99), wantErr: ErrInvalidState},
+		{name: "closed remains closed", start: StateClosed, next: StateClosed, want: StateClosed},
+		{name: "closed opens", start: StateClosed, next: StateOpen, want: StateOpen},
+		{name: "closed cannot skip to half-open", start: StateClosed, next: StateHalfOpen, want: StateClosed, wantErr: ErrInvalidTransition},
+		{name: "open remains open", start: StateOpen, next: StateOpen, want: StateOpen},
+		{name: "open advances to half-open", start: StateOpen, next: StateHalfOpen, want: StateHalfOpen},
+		{name: "open cannot skip to closed", start: StateOpen, next: StateClosed, want: StateOpen, wantErr: ErrInvalidTransition},
+		{name: "half-open remains half-open", start: StateHalfOpen, next: StateHalfOpen, want: StateHalfOpen},
+		{name: "half-open closes", start: StateHalfOpen, next: StateClosed, want: StateClosed},
+		{name: "half-open reopens", start: StateHalfOpen, next: StateOpen, want: StateOpen},
+		{name: "unknown target is rejected", start: StateClosed, next: State(99), want: StateClosed, wantErr: ErrInvalidState},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			circuitBreaker := New()
-			if test.start == StateOpen {
-				if err := circuitBreaker.TransitionTo(StateOpen); err != nil {
-					t.Fatalf("prepare breaker: %v", err)
+			for _, state := range breakerPathTo(test.start) {
+				if err := circuitBreaker.TransitionTo(state); err != nil {
+					t.Fatalf("prepare breaker at %s: %v", test.start, err)
 				}
 			}
 
 			err := circuitBreaker.TransitionTo(test.next)
-			if !errors.Is(err, test.wantErr) {
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
 				t.Fatalf("TransitionTo(%s) error = %v, want %v", test.next, err, test.wantErr)
 			}
-			if got := circuitBreaker.State(); got != test.start {
-				t.Errorf("State() after rejected transition = %s, want %s", got, test.start)
+			if test.wantErr == nil && err != nil {
+				t.Fatalf("TransitionTo(%s) error = %v", test.next, err)
+			}
+			if got := circuitBreaker.State(); got != test.want {
+				t.Errorf("State() = %s, want %s", got, test.want)
 			}
 		})
 	}
 }
 
-func TestBreakerRepeatedStateIsNoOp(t *testing.T) {
-	t.Parallel()
-
-	circuitBreaker := New()
-	if err := circuitBreaker.TransitionTo(StateClosed); err != nil {
-		t.Errorf("TransitionTo(StateClosed) error = %v", err)
+func breakerPathTo(state State) []State {
+	switch state {
+	case StateOpen:
+		return []State{StateOpen}
+	case StateHalfOpen:
+		return []State{StateOpen, StateHalfOpen}
+	default:
+		return nil
 	}
 }
 

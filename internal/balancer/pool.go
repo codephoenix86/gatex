@@ -116,10 +116,12 @@ func (p *Pool) Acquire() (*Backend, bool) {
 }
 
 func (p *Pool) nextRoundRobin() *Backend {
-	start := p.next.Add(1) - 1
+	start := p.next.Load()
 	for offset := range len(p.backends) {
-		backend := p.backends[(start+uint64(offset))%uint64(len(p.backends))]
+		index := (start + uint64(offset)) % uint64(len(p.backends))
+		backend := p.backends[index]
 		if backend.Healthy() {
+			p.next.Store(index + 1)
 			return backend
 		}
 	}
