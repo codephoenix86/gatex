@@ -11,3 +11,17 @@ also available; tracing is added in the remainder of the observability phase.
 
 See [the architecture notes](docs/architecture.md) and
 [the example configuration](configs/gateway.example.yaml) to get started.
+
+## Testing
+
+Run the regular test suite:
+
+```sh
+make test
+```
+
+Run the complete suite with Go's race detector and without cached results:
+
+```sh
+make test-race
+```
