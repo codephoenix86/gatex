@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.vscode
+
+*.md
+docs/
+loadtest/
+scripts/
+
+**/*_test.go
+coverage.out
+gatex
