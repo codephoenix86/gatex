@@ -1,0 +1,34 @@
+x-mock-backend: &mock-backend
+  image: gatex-mockbackend:local
+  build:
+    context: .
+    target: mockbackend
+  restart: unless-stopped
+
+services:
+  gateway:
+    image: gatex:local
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "${GATEX_PORT:-8080}:8080"
+    volumes:
+      - ./configs/gateway.example.yaml:/etc/gatex/gateway.yaml:ro
+    depends_on:
+      - users-1
+      - users-2
+      - orders-1
+    restart: unless-stopped
+
+  users-1:
+    <<: *mock-backend
+    command: ["-listen", ":8080", "-name", "users-1", "-delay", "${BACKEND_DELAY:-2ms}"]
+
+  users-2:
+    <<: *mock-backend
+    command: ["-listen", ":8080", "-name", "users-2", "-delay", "${BACKEND_DELAY:-2ms}"]
+
+  orders-1:
+    <<: *mock-backend
+    command: ["-listen", ":8080", "-name", "orders-1", "-delay", "${BACKEND_DELAY:-2ms}"]
