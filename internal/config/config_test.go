@@ -22,7 +22,7 @@ func validConfig() Config {
 }
 
 func TestExampleConfigurationLoads(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GATEX_API_KEY", "example-test-key")
 
 	cfg, err := Load("../../configs/gateway.example.yaml")
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,11 +20,16 @@ import (
 	"github.com/codephoenix86/gatex/internal/proxy"
 )
 
+const (
+	configPathEnvironmentVariable = "GATEX_CONFIG"
+	defaultConfigPath             = "configs/gateway.example.yaml"
+)
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	configPath := flag.String("config", "configs/gateway.example.yaml", "path to the gateway YAML configuration")
+	configPath := flag.String("config", configPathFromEnvironment(os.LookupEnv), "path to the gateway YAML configuration")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -75,6 +81,13 @@ func main() {
 		gateway.WaitForHealthChecks()
 		gateway.CloseIdleConnections()
 	}
+}
+
+func configPathFromEnvironment(lookup func(string) (string, bool)) string {
+	if path, ok := lookup(configPathEnvironmentVariable); ok && strings.TrimSpace(path) != "" {
+		return path
+	}
+	return defaultConfigPath
 }
 
 // newGatewayHandler declares process-wide middleware from outermost to

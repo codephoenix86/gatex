@@ -12,6 +12,27 @@ also available; tracing is added in the remainder of the observability phase.
 See [the architecture notes](docs/architecture.md) and
 [the example configuration](configs/gateway.example.yaml) to get started.
 
+## Configuration
+
+Gatex reads YAML from the path supplied with `-config`. When the flag is
+omitted, `GATEX_CONFIG` selects the file and otherwise defaults to
+`configs/gateway.example.yaml`. YAML string values can contain required
+`${NAME}` environment placeholders; startup fails if a referenced variable is
+not set.
+
+The example configuration keeps its API key outside source control. Run it
+locally with:
+
+```sh
+GATEX_API_KEY=local-development-key go run ./cmd/gateway
+```
+
+Start the complete container stack the same way:
+
+```sh
+GATEX_API_KEY=local-development-key docker compose up --build
+```
+
 ## Testing
 
 Run the regular test suite:

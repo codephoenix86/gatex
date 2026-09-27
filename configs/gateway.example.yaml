@@ -13,11 +13,11 @@ rate_limit:
   requests_per_second: 50
   burst: 100
 
-# Clients send credentials in X-API-Key. Replace this example credential before
-# protecting production routes; multiple keys permit a no-downtime rotation.
+# Clients send credentials in X-API-Key. Set GATEX_API_KEY before startup;
+# multiple entries can be used to rotate credentials without downtime.
 auth:
   api_keys:
-    - change-me-before-deployment
+    - "${GATEX_API_KEY}"
 
 cors:
   allowed_origins:

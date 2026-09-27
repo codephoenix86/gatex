@@ -1,4 +1,4 @@
-// Package config defines Gatex's file-based configuration contract.
+// Package config defines Gatex's YAML and environment-based configuration contract.
 package config
 
 import (
@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ const (
 	RoundRobin       = "round_robin"
 	LeastConnections = "least_connections"
 )
+
+var environmentPlaceholder = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Config is the top-level YAML configuration for one gateway instance.
 type Config struct {
@@ -107,21 +110,54 @@ type Route struct {
 	Protected   bool       `yaml:"protected,omitempty"`
 }
 
-// Load reads, decodes, and validates a YAML configuration file.
+// Load reads, expands ${NAME} placeholders in YAML string values, decodes, and
+// validates a configuration file. Referenced environment variables are
+// required, including when the placeholder is part of a larger value.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if err := expandEnvironment(&document, os.LookupEnv); err != nil {
+		return Config{}, fmt.Errorf("expand config: %w", err)
+	}
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := document.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func expandEnvironment(node *yaml.Node, lookup func(string) (string, bool)) error {
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		var missing string
+		node.Value = environmentPlaceholder.ReplaceAllStringFunc(node.Value, func(placeholder string) string {
+			name := environmentPlaceholder.FindStringSubmatch(placeholder)[1]
+			value, ok := lookup(name)
+			if !ok && missing == "" {
+				missing = name
+			}
+			return value
+		})
+		if missing != "" {
+			return fmt.Errorf("environment variable %q is not set", missing)
+		}
+	}
+	for _, child := range node.Content {
+		if err := expandEnvironment(child, lookup); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Validate rejects invalid routing, upstream, rate-limit, cache,

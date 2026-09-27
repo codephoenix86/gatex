@@ -42,9 +42,7 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 WORKDIR /app
 
 COPY --from=gateway-build --chown=nonroot:nonroot /out/gatex /usr/local/bin/gatex
-COPY --chown=nonroot:nonroot configs/gateway.example.yaml /etc/gatex/gateway.yaml
 
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/gatex"]
-CMD ["-config", "/etc/gatex/gateway.yaml"]

@@ -161,8 +161,9 @@ implements neither in this phase.
 - `net/http` and `net/http/httputil.ReverseProxy` provide the server, transport,
   cancellation semantics, and core proxy implementation without concealing the
   request path behind a framework.
-- `gopkg.in/yaml.v3` decodes the operator-facing YAML configuration. Its only
-  role is configuration parsing and validation.
+- `gopkg.in/yaml.v3` decodes the operator-facing YAML configuration. String
+  scalar `${NAME}` placeholders are expanded from required environment
+  variables before typed decoding and validation.
 - No HTTP router dependency is included yet. If administrative endpoints grow
   beyond the standard library's needs, `github.com/go-chi/chi/v5` is the
   preferred thin router, restricted to those endpoints.
