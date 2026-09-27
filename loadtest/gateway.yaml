@@ -1,0 +1,27 @@
+listen_address: "127.0.0.1:18080"
+
+timeouts:
+  request: 5s
+  dial: 1s
+  tls_handshake: 1s
+  response_header: 2s
+  idle_connection: 30s
+
+backend_pools:
+  benchmark:
+    strategy: round_robin
+    health_check:
+      path: /healthz
+      interval: 1s
+      timeout: 500ms
+    circuit_breaker:
+      failure_threshold: 5
+      open_timeout: 5s
+      half_open_max_requests: 1
+    backends:
+      - url: http://127.0.0.1:18081
+      - url: http://127.0.0.1:18082
+
+routes:
+  - path_prefix: /api
+    backend_pool: benchmark
