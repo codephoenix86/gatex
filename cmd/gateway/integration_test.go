@@ -123,7 +123,9 @@ func TestGatewayEndToEndAppliesAuthRateLimitAndCache(t *testing.T) {
 		upstreamAPIKeys <- request.Header.Get(middleware.APIKeyHeader)
 		writer.Header().Set("ETag", `"integration-v1"`)
 		writer.Header().Set(proxy.CacheStatusHeader, "UPSTREAM")
-		_, _ = writer.Write([]byte("payload-" + strconv.FormatInt(call, 10)))
+		if _, err := writer.Write([]byte("payload-" + strconv.FormatInt(call, 10))); err != nil {
+			t.Errorf("write mock backend response: %v", err)
+		}
 	}))
 	t.Cleanup(backend.Close)
 
@@ -307,7 +309,9 @@ func newMockBackend(t *testing.T, name string, status int, observed chan<- obser
 		writer.Header().Set("X-Upstream", name)
 		writer.Header().Set(proxy.CacheStatusHeader, "UPSTREAM")
 		writer.WriteHeader(status)
-		_, _ = writer.Write([]byte(name))
+		if _, err := writer.Write([]byte(name)); err != nil {
+			t.Errorf("write mock backend response: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server

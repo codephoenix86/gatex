@@ -113,7 +113,9 @@ func concurrentMockBackend(t *testing.T, name string, calls *atomic.Int64) *http
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
-		_, _ = writer.Write([]byte(name))
+		if _, err := writer.Write([]byte(name)); err != nil {
+			t.Errorf("write concurrent mock backend response: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server

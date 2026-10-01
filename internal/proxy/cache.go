@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -32,7 +33,9 @@ func (r *route) cacheResponses() middleware.Middleware {
 			requestID := RequestID(request.Context())
 			key := responseCacheKey(request)
 			if cached, ok := r.responseCache.Get(key); ok {
-				writeCachedResponse(w, cached, requestID)
+				if err := writeCachedResponse(w, cached, requestID); err != nil {
+					slog.ErrorContext(request.Context(), "write cached response", "request_id", requestID, "error", err)
+				}
 				return
 			}
 
@@ -182,12 +185,13 @@ func responseCacheKey(request *http.Request) string {
 	return scheme + "\x00" + strings.ToLower(request.Host) + "\x00" + request.URL.RequestURI()
 }
 
-func writeCachedResponse(writer http.ResponseWriter, response responsecache.Response, requestID string) {
+func writeCachedResponse(writer http.ResponseWriter, response responsecache.Response, requestID string) error {
 	for name, values := range response.Header {
 		writer.Header()[name] = append([]string(nil), values...)
 	}
 	writer.Header().Set(RequestIDHeader, requestID)
 	writer.Header().Set(CacheStatusHeader, cacheHit)
 	writer.WriteHeader(response.StatusCode)
-	_, _ = writer.Write(response.Body)
+	_, err := writer.Write(response.Body)
+	return err
 }

@@ -31,7 +31,9 @@ func main() {
 		}
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		writer.Header().Set("X-Mock-Backend", *name)
-		_, _ = fmt.Fprintln(writer, *name)
+		if _, err := fmt.Fprintln(writer, *name); err != nil {
+			log.Printf("write response: %v", err)
+		}
 	})
 
 	server := &http.Server{

@@ -20,7 +20,9 @@ func TestRequestLoggerRecordsStructuredResponseDetails(t *testing.T) {
 	handler := RequestLogger(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestmeta.SetBackend(r.Context(), "http://backend.internal")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, "hello")
+		if _, err := io.WriteString(w, "hello"); err != nil {
+			t.Errorf("write response: %v", err)
+		}
 	}))
 	request := httptest.NewRequest(http.MethodPost, "http://gateway.example/resources?secret=hidden", nil)
 	request.Header.Set(requestmeta.IDHeader, "request-123")
